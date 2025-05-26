@@ -1,0 +1,1888 @@
+---
+title: "Okeanos script"
+author: "Lara Beckmann"
+date: "2025-02-24"
+output:
+  html_document: 
+   toc: true
+   number_sections: true
+   toc_float: true
+  word_document: default
+  pdf_document: 
+   toc: true
+   toc_depth: 2
+   number_sections: true
+---
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+# PREPARATIONS
+
+## Set working directory 
+> Should include all data files:
+
+* expanded_data.csv
+* wide_data.csv
+* taxa_sheet_all.csv
+* forest_data.csv
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/Users/lara/Downloads/Okeanos Alaska Video Analysis/R Analysis/Okeanos-Video-Analysis/raw_data')
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Clear the entire environment
+rm(list = ls())
+```
+
+## Load libraries
+
+```{r, echo=TRUE, message=FALSE}
+
+library(dplyr)
+library(vegan)
+library(pvclust)
+library(corrplot)
+library(GGally)
+library(gclus)
+library(rcompanion)
+library(ggplot2)
+library(ape)
+library(adespatial)
+library(ade4)
+library(knitr)
+library(ridgeline)
+library(ggridges)
+library(mgcv)
+library(viridis)
+library(tidyverse)
+library(tidyr)
+library(readxl)
+library(geosphere)
+library(lubridate)
+library(kableExtra)
+library(splines)  
+library(ggpubr)
+library(ggrepel)
+#remotes::install_github("MikkoVihtakari/ggOceanMaps")
+library(ggOceanMaps)
+
+```
+
+## Load all data
+
+```{r}
+
+#expanded data - DATASET A
+data.a <- read.csv("./expanded_data.csv", sep = ",", header=TRUE) #extracted from raw data where counts are translated into rows - This is also called Dataset A 
+
+# wide data - DATASET B 
+data.b <- read.csv("./wide_data.csv", sep = ",", header=TRUE) #this file is wide data plus all the env data that I extracted manually - This is also called Dataset B, and will become dataset C when aggregated by site
+
+#Load taxa sheet file - TAXA 
+taxa <- read.csv("./taxa_sheet_all.csv", sep = ",", header=TRUE) #all morphotypes and their metadata 
+
+#Load the forest data 
+garden_length_df <- read.csv("./forest_data.csv", sep = ",", header=TRUE)
+
+```
+
+> Explanation: Dive_Name is the code for each EX dive. Here the correct names of each location. In some plots only the numbers will be shown, so here is the reference list:
+
+>
+1) 2304_02 = Big Bend
+2) 2304_05 = Lone Knoll  
+3) 2304_07 = Uliaga     
+4) 2304_08 = Umnak     
+5) 2306_01  = Kodiak    
+6) 2306_03  = Giacomini     
+7) 2306_04  = Quinn    
+8) 2306_05  = Surveyor    
+9) 2306_06  = Durgin    
+10) 2306_07 = Deep Discover 
+11) 2306_08 = Denson
+12) 2306_12 = Noyes      
+13) 2306_14 = Chatham      
+14) 2306_15 = Middleton    
+15) 2306_18 = Gumpy 
+
+# BASIC DATA
+
+> Before starting any data manipulation, getting some data summaries and basic statistics 
+
+## Summary statistics - morphotype data
+
+> Here I calculate the basics, like how many taxa, how many observations etc. This is done before aggregating the data into depth bins, as the data is still complete here and I can work with the rows. This uses the full expanded dataset (Dataset A) and the taxa sheet. 
+
+```{r}
+#How many total morphotypes?
+nrow(taxa)
+#How many total coral morphotypes?
+sum(taxa$Phylum == "Cnidaria")
+#How many total sponge morphotypes?
+sum(taxa$Phylum == "Porifera")
+#How many total observations?
+nrow(data.a) #counting all rows of the Dataset A
+#How many coral observations?
+sum(data.a$Phylum == "Cnidaria")
+#How many sponge observations?
+sum(data.a$Phylum == "Porifera")
+#How many coral observations of species level?
+sum(data.a$Phylum == "Cnidaria" & data.a$Species != "")
+#How many sponge observations of species level?
+sum(data.a$Phylum == "Porifera" & data.a$Species != "")
+
+#How many (and which) morphotypes occurred in a single dive only?
+# First, aggregate the data to count the occurrences of each morphotype across all dives
+morphotype_counts <- data.a %>%
+  group_by(Morphotype) %>%
+  summarise(Count = n_distinct(Dive.Name))
+# Filter the aggregated data to include only morphotypes that occurred in a single dive
+morphotypes_single_dive <- morphotype_counts %>%
+  filter(Count == 1) #change number for what to check
+
+# Count the number of morphotypes that occurred in a single dive
+num_single_dive_morphotypes <- nrow(morphotypes_single_dive)
+# Print the number of morphotypes that occurred in a single dive
+print(num_single_dive_morphotypes)
+# Frequency of this number:
+(100/(length(unique(data.a$Morphotype))))*num_single_dive_morphotypes
+# Can print the morphotypes that occurred in a single dive only: 
+#knitr::kable(morphotypes_single_dive, caption = "Morphotypes that occures in a single dive location only")
+
+``` 
+
+> Now I want to plot density (number of counts) by depth and divided for each phylum. Since some depths have been visited several times, I am scaling the counts by the duration of each dive, which results in an effort-corrected count. This way there is no bias on the density, e.g. if more time spent in 700 m because there were 2 dives. The plot also gives an overview of the highest abundances, and how the abundances change over depth. 
+
+```{r}
+
+# Find the effort of time by depth
+# Calculate duration for each dive
+# Convert Start.Date and End.Date to POSIXct datetime format
+data.a <- data.a %>%
+  mutate(
+    Start.Time = as.POSIXct(Start.Date, format = "%Y%m%dT%H%M%S", tz = "UTC"),
+    End.Time = as.POSIXct(End.Date, format = "%Y%m%dT%H%M%S", tz = "UTC")
+  )
+  
+# Calculate duration for each dive
+dive_duration <- data.a %>%
+  dplyr::group_by(Dive.Name) %>%
+  dplyr::summarize(Duration = as.numeric(difftime(max(End.Time), min(Start.Time), units = "secs")), .groups = "drop")
+
+knitr::kable(dive_duration, caption = "Duration by Dive site (min)")
+
+dive_duration <- dive_duration %>%
+  mutate(scaled_time = scale(Duration)) #will be in seconds
+
+# Count occurrences per Depth and Phylum
+df_summary <- data.a %>%
+  group_by(Depth..m., Phylum, Dive.Name) %>%
+  summarise(Count = n(), .groups = "drop")
+
+# Merge dive durations with df_summary
+df_corrected <- df_summary %>%
+  left_join(dive_duration, by = "Dive.Name") %>% 
+  mutate(Duration_hr = as.numeric(Duration) / 3600,  # Convert seconds to hours
+         Effort_Corrected_Count = Count / Duration_hr) # Normalize counts by hours
+
+# Plot density with effort correction
+ggplot(df_corrected, aes(x = Depth..m., fill = Phylum, weight = Effort_Corrected_Count)) +
+  geom_density(alpha = 0.7) +  # Density plot with transparency
+  scale_fill_manual(values = c("Cnidaria" = "#d8514e", "Porifera" = "#f2c714")) +  # Custom colors
+  scale_x_reverse(breaks=seq(400, 3200, 200)) +  # Flip depth axis so shallowest is on top
+  coord_flip() +
+  labs(x = "Depth (m)", y = "Effort-Corrected Density", fill = "Phylum") +
+  theme_minimal()
+
+#plot without effort correction
+ggplot(data.a, aes(x = Depth..m., fill = Phylum)) +
+  geom_density(alpha = 0.7) + # Adjust transparency
+  scale_fill_manual(values = c("Cnidaria" = "#d8514e", "Porifera" = "#f2c714")) +
+  labs(x = "Depth (m)", y = "Density", fill = "Phylum") +
+  theme_minimal() +
+  coord_flip() +
+  scale_x_reverse(breaks=seq(400, 3200, 200)) 
+
+# Bin the df into depth for a test on the abundances by depth - bins in 5 meter, but can be adapted. 
+
+df_corrected <- df_corrected %>%
+  mutate(depth_bin = cut(Depth..m., breaks = seq(0, max(Depth..m.), by = 5), include.lowest = TRUE)) %>%
+  mutate(depth_bin = as.factor(depth_bin))  
+
+# Is there a linear effect? 
+glm_model <- glm(Effort_Corrected_Count ~ Depth..m., data = df_corrected, family = quasipoisson) # need to use quasipoisson because its non-integer counts with the correction 
+summary(glm_model) # No
+glm_numeric <- glm(Effort_Corrected_Count ~ as.numeric(Depth..m.),  data = df_corrected, family = quasipoisson)
+summary(glm_numeric) # No
+
+# Is there a non-linear effect?
+gam_model <- gam(Effort_Corrected_Count ~ s(Depth..m.), data = df_corrected, family = quasipoisson) 
+summary(gam_model) # yes, significant, meaning that there are peaks with higher abundances, but no linear decline. 
+plot(gam_model) 
+
+# Is there an overall depth effect?
+anova(glm_model, test = "Chisq") # no 
+
+# And if we use the non-corrected data? 
+glm_model <- glm(Count ~ Depth..m., data = df_summary, family = poisson)
+summary(glm_model)  # Poisson - this is significant, but might be biased because of the sampling effort
+     
+```
+
+> In geom_density(), the density represents a smoothed estimate of the distribution of observations across depth.
+It's similar to a histogram but smoothed into a continuous curve. 
+The uncorrected plot could over-represent depths where more time was spent during each dive, also overlapping dives.
+The effort-corrected plot gives a better idea of relative abundance per unit effort, making it more comparable across depths.
+
+> The statistical tests on depth effect on abundances shows a complex situation. But there is not a linear trend, that is abundances are not decreasing with depth, but that there are peaks. From the GAM model there are three large peaks (this could also be because of the sites...), but the middle peak is the lowest. 
+
+> Continuing with morphotypes per depth, as overview of how many morphotyes were seen across the depth. 
+
+```{r}
+
+# Count unique morphotypes per depth for each phylum
+morpho_diversity <- data.a %>%
+  group_by(Depth..m., Phylum) %>% # by each depth now, but can also be done with depth bin, replacing than Depth..m. with depth_bin
+  summarise(Unique_Morphotypes = n_distinct(Morphotype), .groups = "drop")
+
+df_corrected <- df_summary %>%
+  left_join(dive_duration, by = "Dive.Name") %>% 
+  mutate(Duration_hr = as.numeric(Duration) / 3600,  # Convert seconds to hours
+         Effort_Corrected_Count = Count / Duration_hr) # Normalize counts by hours
+
+# Step 2: Merge with df_corrected (Ensuring Consistency)
+df_corrected <- df_corrected %>%
+  left_join(morpho_diversity, by = c("Depth..m.", "Phylum"))  
+ 
+df_corrected <- df_corrected %>% 
+   mutate(Effort_Corrected_Div = Unique_Morphotypes / Duration_hr) # Normalize counts by hours
+
+ggplot(df_corrected, aes(x = Depth..m., fill = Phylum, weight = Effort_Corrected_Count)) +
+  #geom_density(alpha = 0.7) +  # Density plot with transparency
+  geom_smooth(aes(y = Effort_Corrected_Div, color = Phylum), method = "loess", se = TRUE) +
+  scale_fill_manual(values = c("Cnidaria" = "#d8514e", "Porifera" = "#f2c714")) +  # Custom color
+  coord_flip() +
+  labs(x = "Depth (m)", y = "Effort-Corrected Density", fill = "Phylum") +
+  theme_minimal() +
+  scale_x_reverse(breaks=seq(400, 3200, 200)) 
+
+```
+
+> The morphotype density shows that most morphotypes were observed in shallower depths, but a continous diversity below the OMZ. Curiuosly when using the corrected data, it seems as corals are more abundant and more diverse, compared to sponges. This could be due to the effort-correction. 
+
+## Summary statistics - environmental data
+
+```{r}
+
+## Extract metadata for each dive - use dataset B
+meta_summary <- data.b[,169:181] #select only the columns that have the environmental data, exclude any morphotype data
+meta_summary$Group <-  data.b$Dive.Name
+meta_summary <- meta_summary %>%
+  group_by(Group) %>%
+  summarise_all(list(~ mean(., na.rm = TRUE), ~ sd(., na.rm = TRUE))) # Compute mean and sd
+
+kable(meta_summary) %>%
+  kable_styling(font_size = 5, latex_options = c("striped")) 
+                
+# What are max/min values for depth, oxygen etc?
+
+max(data.a$Depth..m.)
+min(data.a$Depth..m.)
+max(data.a$Oxygen.Concentration..mg.l.)
+min(data.a$Oxygen.Concentration..mg.l.)
+max(data.a$Salinity..psu.)
+min(data.a$Salinity..psu.)
+
+# Threshold values for OMZ: <1ml/L or hypoxic <0.5 ml/L - need to calculate in mg/L to make it comparable:
+# Conversion factor × 1.429 
+
+print(omz <- 1*1.429) # 1.429 is the threshold for mg/L
+print(hypoxic <- 0.5*1.429) # 0.715 is the threshold for a severe hypoxic condition in mg/L 
+
+# Which depths are inside the OMZ? 
+
+within_omz <- data.a %>% filter(Oxygen.Concentration..mg.l. < omz)
+min(within_omz$Depth..m.)
+max(within_omz$Depth..m.) 
+
+
+```
+
+## Correlations - environmental variables
+
+> Check if any of the environmental variables are correlated, this is important for the analysis, and can be used to exclude variables, simplifying the further analysis.
+
+```{r}
+
+# Compute Pearson correlation matrix
+env.pearson <- cor(data.a[,17:22], use = "pairwise.complete.obs") 
+round(env.pearson, 2) 
+
+# Pairplot with correlation coefficients
+ggpairs(data.a[,17:22], 
+        lower = list(continuous = wrap("smooth", color = "blue")),  # Smoothed regression lines
+        upper = list(continuous = wrap("cor", size = 5)),  # Pearson correlation values
+        diag = list(continuous = wrap("barDiag", fill = "lightblue"))) +  # Histogram on diagonals
+  theme_bw()
+
+# Correlation plot
+corrplot(env.pearson, method = "circle", type = "upper", tl.col = "black", tl.cex = 0.8, addCoef.col = "black")
+
+```
+
+### Temperature-Oxygen and Temperature-Salinity Plots
+
+> Figure 2. 
+
+```{r}
+
+# Create the plot 1) TEMP vs Oxgyen
+ggplot(data.a, aes(y = Temperature..C., x = Oxygen.Concentration..mg.l., color = Depth..m.)) +
+  geom_point(size = 1) +    # Scatter plot with color representing depth
+  #scale_color_gradient(name = "Depth (m)", low = "blue", high = "red") +  # Color gradient
+  scale_color_viridis(option = "viridis", direction = -1) +  # Color scale with cividis for colorblind-friendly option
+  #scale_y_reverse() +  # Reverse y-axis to put shallow depth on top
+  xlab("Oxygen (mg/L)") +                         # X-axis label
+  ylab("Temperature (°C)") +                      # Left y-axis label
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text (size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background= element_rect(colour="black"),
+        legend.position = "right")
+
+# Create the plot 2) Salinity vs Temperature
+ggplot(data.a, aes(y = Temperature..C., x = Salinity..psu., color = Depth..m.)) +
+  geom_point(size = 1) +    # Scatter plot with color representing depth
+  #scale_color_gradient(name = "Depth (m)", low = "blue", high = "red") +  # Color gradient
+  scale_color_viridis(option = "viridis", direction = -1) +  # Color scale with cividis for colorblind-friendly option
+  #scale_y_reverse() +  # Reverse y-axis to put shallow depth on top
+  xlab("Salinity (psu)") +                         # X-axis label
+  ylab("Temperature (°C)") +                      # Left y-axis label
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text (size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background= element_rect(colour="black"),
+        legend.position = "right")
+
+```
+
+# DATA MANIPULATION
+
+## Aggregate observations 
+> The observations are binned into 5 meter depth bins to simplify and aggregate data and reduce computation time. Otherwise, some analyses take a long time. Here we will be using the Dataset B - the wide data.  
+
+```{r, error=FALSE, results='hide', warning=FALSE}
+depth_bins <- seq(0, max(data.b$depth, na.rm = TRUE)+100, by = 5) # in 5 meter bins, indicated by=5 
+depth_labels <- paste0(depth_bins[-length(depth_bins)] + 1, "-", depth_bins[-1]) #add labels for each depth bin
+
+# Add depth bin column to the dataframe
+data.b <- data.b %>% 
+  mutate(depth_bin = cut(depth, breaks = depth_bins, labels = depth_labels, include.lowest = TRUE)) 
+
+# Aggregate species data by Dive.Name and Depth_bin
+df_species_aggregated <- data.b %>%
+  group_by(Dive.Name, depth_bin) %>% #Dive.Name is the column that indiciates the site/location (E.g. EX2304_07 is Uliaga seamount)
+  summarise(across(3:166, sum, .names = "{.col}"), .groups = "drop") #across all columns with taxa
+
+# Aggregate environmental variables by Dive.Name and Depth_bin
+# Function to calculate the mode, for this numeric value it takes the mean
+get_mode <- function(x) {
+  x <- na.omit(x)
+  if(length(x) == 0) return(NA)
+  uniq_vals <- unique(x)
+  uniq_vals[which.max(tabulate(match(x, uniq_vals)))]}
+
+# Ensure lat/lon are numeric before aggregation, otherwise there might be an error 
+data.b$lat <- as.numeric(data.b$lat)
+data.b$lon <- as.numeric(data.b$lon)
+
+#Aggregating with mean for numeric columns and most common for character columns
+df_env_aggregated <- data.b %>%
+  group_by(Dive.Name, depth_bin) %>% 
+  summarise(across(167:179, mean, na.rm = TRUE),  # Numeric columns - here might appear an error in newer dyplr versions, but does the same thing! 
+            sed_type = get_mode(sed_type),  #since this is a character, we need to use the primary sediment type (most common one) 
+            sed_consistency = get_mode(sed_consistency), #the same here
+            .groups = "drop")
+
+# Merge species and environmental data
+data.b <- left_join(df_species_aggregated, df_env_aggregated, by = c("Dive.Name", "depth_bin")) 
+#OBS for Dive 2306-08 its NA because backscatter (bs) had no values due to technical errors during the dive
+
+#Add the "water mass and/or current" to the dataset 
+data.b <- data.b %>%
+  mutate(watermass = case_when(
+    grepl("2306_04|2306_08", Dive.Name) ~ "PDW", #PDW (without LCDW)
+    grepl("2306_03|2306_05|2306_06", Dive.Name) ~ "PSIW", #Gulf of Alaska Gyre (Alaska current + eddies) = PSIW water mass 
+    grepl("2304_07|2304_08", Dive.Name) ~ "ANSC" , #ANSC + Samalga Pass
+    grepl("2306_12|2306_14|2306_15|2306_18", Dive.Name) ~ "ACC" , #ACC Alaska coastal current, on the shelf
+    grepl("2304_02|2304_05|2306_01|2306_07", Dive.Name) ~ "PDW/LCDW" #PDW/LCDW water mass - deepest locations too 
+  ))
+
+#write.xlsx(data.b, "aggregated_data.xlsx") #to check the df if needed
+
+```
+
+## Extract individual columns 
+
+```{r, results='hide'}
+#Extract individual df for coordinates, species data and env data
+#coord <-data.b[,167:168] #select the columns that have the lat/lon
+
+coord <- data.frame(
+  lat = round(data.b[, 167], 6),
+  lon = round(data.b[, 168], 6))
+ENV   <-data.b[,169:181] #all the env data
+ENV   <- ENV[,-c(4:5)] #remove aspect and aspect_rad, not needed 
+SPE   <-data.b[,3:166] #all annotation/taxa data
+#write.xlsx(SPE, "SPE_data.xlsx") #to check the df if needed
+
+```
+
+## Create Dataset C
+
+> In some cases, a dataset is needed where all data is aggregated by site. Here, I will call this Dataset C (short dataset) in contrast to Dataset B (full dataset, rows being annotation timestamps)
+
+```{r}
+#Use Dive.Name to combine/summarise and create a new combined df
+data.c <- data.b %>%
+  group_by(Dive.Name) %>%
+  summarise(
+    across(all_of(colnames(SPE)), sum, .names = "{.col}"),  # Sum for SPE columns
+    sed_type = get_mode(sed_type),  #since this is a character, we need to use the primary sediment type (most common one) 
+    sed_consistency = get_mode(sed_consistency), #the same here
+    across(where(is.numeric) & all_of(colnames(ENV)), mean, na.rm = TRUE, .names = "{.col}"),  # Mean for numeric ENV columns
+    across(all_of(colnames(coord)), first, .names = "{.col}"),  # First for coord columns
+    .groups = "drop"
+  ) %>%
+  as.data.frame()
+
+data.c <- data.c %>%
+  mutate(watermass = case_when(
+    grepl("2306_04|2306_08", Dive.Name) ~ "PDW", #PDW (without LCDW)
+    grepl("2306_03|2306_05|2306_06", Dive.Name) ~ "PSIW", #Gulf of Alaska Gyre (Alaska current + eddies) = PSIW water mass 
+    grepl("2304_07|2304_08", Dive.Name) ~ "ANSC" , #ANSC + Samalga Pass
+    grepl("2306_12|2306_14|2306_15|2306_18", Dive.Name) ~ "ACC" , #ACC Alaska coastal current, on the shelf
+    grepl("2304_02|2304_05|2306_01|2306_07", Dive.Name) ~ "PDW/LCDW" #PDW/LCDW water mass - deepest locations too 
+  ))
+
+```
+
+> Now I want to create again SPE and ENV dfs from the combined dataset C
+
+```{r}
+
+ENV2   <-data.c[,166:176] #all the env data
+SPE2   <-data.c[,2:165] #all annotation/taxa data
+#write.xlsx(SPE2, "SPE_data.xlsx") #to check the df if needed 
+
+```
+
+## Create Dataset FL (Family Level)
+
+> Since there might be patterns in the family instead of morphotypes, the data is aggregated into family level. 
+
+```{r}
+
+# Merge taxa information with the column names of SPE, Define a function to replace NA values with the next available information, and replace empty strings with NA
+taxa[taxa == ""] <- NA
+fill_family <- function(df) {
+  df %>%
+    mutate(Family = ifelse(is.na(Family),
+                           ifelse(!is.na(Class), Class, Phylum),
+                           Family))}
+
+taxa_filled <- fill_family(taxa)
+column_names <- data.frame(Morphotype = colnames(SPE), stringsAsFactors = FALSE)
+taxa_mapping <- taxa_filled %>%
+  dplyr::select(Morphotype, Family) %>%
+  dplyr::mutate(Family = as.factor(Family))
+
+# Merge column names with taxa information
+column_info <- merge(column_names, taxa_mapping, by = "Morphotype", all.x = TRUE)
+# Group columns by family
+grouped_columns <- column_info %>%
+  group_by(Family) %>%
+  summarise(Morphotype = list(Morphotype), .groups = 'drop')
+
+# Initialize a new data frame for combined data
+SPE.fam <- data.frame(matrix(ncol = nrow(grouped_columns), nrow = nrow(SPE)))
+colnames(SPE.fam) <- grouped_columns$Family
+
+# Combine columns by family
+for (i in 1:nrow(grouped_columns)) {
+  family_columns <- grouped_columns$Morphotype[[i]]
+  # Ensure that the selected columns are treated as a data frame
+  selected_data <- SPE[ , family_columns, drop = FALSE]
+  # Sum columns belonging to the same family
+  SPE.fam[[i]] <- rowSums(selected_data, na.rm = TRUE)
+}
+
+# print to check
+# SPE.fam
+
+```
+
+# DISTRIBUTION PATTERNS
+
+> Here the morphotype data is explored in more detail. Which family most speciose and so on. 
+
+```{r}
+
+# Which is the most abundant morphotype?
+# Sum the counts for each morphotype (column) across all locations (rows)
+total_abundance <- colSums(SPE)
+# Sort the families by total abundance in descending order
+most_abundant_taxa <- sort(total_abundance, decreasing = TRUE)
+# View the sorted list of most abundant taxa
+most_abundant_taxa
+
+# Which is the most abundant family?
+# Sum the counts for each morphotype (column) across all locations (rows)
+total_abundance_fam <- colSums(SPE.fam)
+most_abundant_family<- sort(total_abundance_fam, decreasing = TRUE)
+most_abundant_family 
+
+# Which taxa/families are depth generalists? Which are more specialised? (Occuring in only one depth e.g.)
+
+# Combine species data with depth information
+species_depth <- cbind(SPE.fam, Depth = ENV$depth)
+
+# Count how many unique depths each morphotype appears in
+species_depth_counts <- species_depth %>%
+  summarise(across(-Depth, ~length(unique(Depth[. > 0])))) %>%
+  t() %>%
+  as.data.frame()
+
+colnames(species_depth_counts) <- "Unique_Depths"
+species_depth_counts$Species <- rownames(species_depth_counts)
+
+# View family with the most and least depth occurrences
+species_depth_counts <- species_depth_counts[order(species_depth_counts$Unique_Depths), ]
+
+# Define threshold (e.g., species in < 10 depths = specialist, otherwise generalist)
+species_depth_counts$Category <- ifelse(species_depth_counts$Unique_Depths < 10, "Specialist", "Generalist")
+
+# Convert SPE to long format for ggplot
+species_long <- SPE.fam %>%
+  mutate(Depth = ENV$depth) %>%
+  pivot_longer(cols = -Depth, names_to = "Species", values_to = "Abundance") %>%
+  filter(Abundance > 0)  # Remove absences
+
+# Calculate depth range for each species
+species_ranges <- species_long %>%
+  group_by(Species) %>%
+  summarise(MinDepth = min(Depth), MaxDepth = max(Depth)) %>%
+  mutate(DepthRange = MaxDepth - MinDepth,
+         Category = ifelse(DepthRange > 1000, "Generalist", "Specialist"))
+
+# Merge category information with long species data
+species_long <- species_long %>%
+  left_join(species_ranges, by = "Species")
+
+# Plot with generalists highlighted
+ggplot(species_long, aes(x = reorder(Species, Depth), y = Depth, color = Category)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_color_manual(values = c("Generalist" = "red", "Specialist" = "black")) + 
+  labs(y = "Depth (m)", x = "Species",
+       title = "Species Depth Ranges",
+       color = "Category") +
+  theme_minimal()
+
+```
+
+# GARDEN ANALYSIS
+
+> First step is to go through each dive transect, and see where the individual counts are the highest. For this a simple histogram by depth is needed. 
+
+## Selection of high densitites
+
+```{r}
+
+#the time is calculated in seconds
+min <- 10
+seconds <- min*60
+divesites <- unique(data.a$Dive.Name)
+plotList = vector( "list", length = 15)
+ 
+for (i in 1:15){ # 15 dive sites
+  site <- c()
+  site[[ i ]] <- subset(data.a, Dive.Name == divesites[i]) # first create subset for each dive 
+  plotList[[ i ]] = ggplot( site[[ i ]], aes(x=Start.Time, y = ..density..)) +
+    geom_histogram(binwidth= seconds, alpha=1.5) +
+    geom_density(size=1, color="blue")
+}
+print(plotList)
+
+```
+
+> This was analysed manually, inspecting the plot for high density peaks. The following decisions for taken:
+Dives with high densities: EX2304: 02 + 07. EX2306: 03 + 05 + 14 + 15 + 18 + Maybe 07? + Maybe 12? 
+Those dives were inspected again, and the timing of the high densitites specified. More details can be found in the next table:
+
+## Data completion
+
+> The following is a script to add data to the garden_density_df - as given in the supplementary file. Just to explain what has been done.
+
+```{r}
+
+kable(garden_length_df) %>%
+  kable_styling(font_size = 7, latex_options = c("striped"))
+
+# Function to calculate distance, returning NA if any coordinate is NA
+calculate_distance <- function(lat1, lon1, lat2, lon2) {
+  if (is.na(lat1) | is.na(lon1) | is.na(lat2) | is.na(lon2)) {
+    return(NA)
+  } else {
+    return(distHaversine(c(lon1, lat1), c(lon2, lat2)))
+  }
+}
+
+# Calculate the horizontal distance between the coordinates
+garden_length_df$horizontal_distance_m <- mapply(calculate_distance, garden_length_df$lat_loc_1, garden_length_df$lon_loc_1, garden_length_df$lat_loc_2, garden_length_df$lon_loc_2)
+
+# Calculate the vertical distance (depth difference) in meters
+calculate_vertical_distance <- function(depth1, depth2) {
+  if (is.na(depth1) | is.na(depth2)) {
+    return(NA)
+  } else {
+    return(abs(depth2 - depth1))
+  }
+}
+
+garden_length_df$vertical_distance_m <- mapply(calculate_vertical_distance, garden_length_df$depth_loc_1, garden_length_df$depth_loc_2)
+
+# Function to calculate depth distance (using pythagoras formula)
+calculate_3D_distance <- function(lat1, lon1, depth1, lat2, lon2, depth2) {
+  if (is.na(lat1) | is.na(lon1) | is.na(depth1) | is.na(lat2) | is.na(lon2) | is.na(depth2)) {
+    return(NA)
+  } else {
+    # Calculate horizontal distance in meters using Haversine formula
+    horizontal_distance <- distHaversine(c(lon1, lat1), c(lon2, lat2))
+    # Calculate vertical distance in meters
+    vertical_distance <- abs(depth2 - depth1)
+    # Calculate 3D distance using Pythagorean theorem
+    distance_3d <- sqrt(horizontal_distance^2 + vertical_distance^2)
+    return(distance_3d)
+  }
+}
+
+# Calculate the 3D distance between the coordinates - total distance 
+garden_length_df$distance_3D_m <- mapply(calculate_3D_distance, garden_length_df$lat_loc_1, garden_length_df$lon_loc_1, garden_length_df$depth_loc_1, garden_length_df$lat_loc_2, garden_length_df$lon_loc_2, garden_length_df$depth_loc_2)
+
+# Convert Start.Date to POSIXct
+data.a$Start.Date <- ymd_hms(data.a$Start.Date, tz = "UTC")
+data.a$time <- format(data.a$Start.Date, "%Y-%m-%d %H:%M:%S UTC")
+# Format the time column based on Start.Date and convert to POSIXct
+data.a$time <- as.POSIXct(format(data.a$Start.Date, "%Y-%m-%d %H:%M:%S UTC"), tz = "UTC")
+
+# Convert the whole column to the desired format
+garden_length_df <- garden_length_df %>%
+   mutate(time_start = mdy_hm(time_start),  # Parse the date-time
+         time_start = format(with_tz(time_start, "UTC"), "%Y-%m-%d %H:%M:%S UTC"),  # Convert to UTC and format
+         time_end = mdy_hm(time_end),  
+         time_end = format(with_tz(time_end, "UTC"), "%Y-%m-%d %H:%M:%S UTC")) 
+
+# Also order the rows by time, as right now its not bc of the expansion of the df (counts)
+data.a <- data.a %>% arrange(time)
+
+# number of observations in each garden
+garden_length_df <- garden_length_df %>%
+  mutate(n = sapply(1:nrow(garden_length_df), function(i) {
+    # Get the start and end times for the current region in UTC
+    start_time <- ymd_hms(garden_length_df$time_start[i], tz = "UTC")
+    end_time <- ymd_hms(garden_length_df$time_end[i], tz = "UTC")
+    # Count the number of rows in data.a where time falls within the range of start_time and end_time
+    num_rows <- nrow(data.a %>% filter(time >= start_time & time <= end_time))
+    return(num_rows)
+  }))
+
+#Ind_min#
+garden_length_df$ind_min <- garden_length_df$n / as.numeric(garden_length_df$total.time)
+
+#Ind_m# (using the total distance 3D)
+garden_length_df$ind_m_traveled <- garden_length_df$n / garden_length_df$distance_3D_m 
+
+kable(garden_length_df) %>%
+  kable_styling(font_size = 5, latex_options = c("striped"))
+
+#To save this file use:
+#library(openxlsx)
+#write.xlsx(garden_length_df, "output.xlsx")
+
+```
+
+> Now we have detailed information for each forest. Next the density data will be analysed. Th
+
+## Density data for forest analysis
+
+> I put this in the same df as the length data, but as sheets. Now I saved each individual sheet as a file, to be able to work with it. 
+All files are availabe from the Supplementary File (just save each sheet separately)
+
+```{r}
+
+# Read all garden files
+# You may need to adapt the path
+
+file_paths <- c(
+  "./garden densities/D02_2304_G02A.xlsx", "./garden densities/D03_2306_G03A.xlsx",
+  "./garden densities/D05_2306_G05A.xlsx", "./garden densities/D07_2304_G07A.xlsx",
+  "./garden densities/D07_2306_G07A.xlsx", "./garden densities/D12_2306_G12A.xlsx",
+  "./garden densities/D15_2306_G15A.xlsx", "./garden densities/D18_2306_G18B.xlsx"
+)
+
+garden_ids <- c("D02_2304_G02A", "D03_2306_G03A", "D05_2306_G05A", "D07_2304_G07A", "2306-G07A", "D12_2306_G12A", "D15_2306_G15A", "D18_2306_G18B")
+
+# Read data and assign garden_ids
+list_of_dfs <- lapply(seq_along(file_paths), function(i) {
+  df <- read_excel(file_paths[i])
+  df$garden_id <- garden_ids[i]
+  return(df)
+})
+
+# Function to calculate average density per morphotype
+summarize_density_df <- function(df) {
+  df %>%
+    group_by(garden_id) %>%
+    summarise(across(starts_with("P") | starts_with("C"), ~ mean(.x / area_squared, na.rm = TRUE))) %>%
+    pivot_longer(cols = -garden_id, names_to = "Morphotype", values_to = "density")
+}
+
+# Apply function to all garden data
+gardens_df <- bind_rows(lapply(list_of_dfs, summarize_density_df), .id = "df_id")
+
+# Join with taxa data (assumed to be available)
+gardens_df <- gardens_df %>%
+  left_join(taxa, by = "Morphotype")
+
+# Plot function to simplify repeated plot code
+plot_density <- function(data, group_col, fill_col, title) {
+  data %>%
+    group_by(garden_id, !!sym(group_col)) %>%
+    summarise(total_density = sum(density)) %>%
+    mutate(prop_density = total_density / sum(total_density)) %>%
+    ggplot(aes(x = garden_id, y = total_density, fill = !!sym(group_col))) +
+    geom_bar(stat = "identity", aes(weight = prop_density), position = "stack") +
+    labs(x = "Garden ID", y = "Individuals per m^2", title = title) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Plot densities by Phylum, Morphotype, and Family
+plot_density(gardens_df, "Phylum", "Phylum", "Densities by Phylum")
+plot_density(gardens_df, "Morphotype", "Morphotype", "Densities by Morphotype")
+plot_density(gardens_df, "Family", "Family", "Densities by Family")
+
+# Calculate sponge-dominated gardens
+sponge_dominated <- gardens_df %>%
+  group_by(garden_id, Phylum) %>%
+  summarise(total_density = sum(density, na.rm = TRUE)) %>%
+  group_by(garden_id) %>%
+  mutate(proportion = total_density / sum(total_density, na.rm = TRUE)) %>%
+  filter(Phylum == "Porifera") %>%
+  mutate(is_sponge_dominated = proportion >= 0.7)
+
+# Output results
+kable(sponge_dominated) %>% kable_styling(font_size = 7, latex_options = c("striped"))
+
+# Calculate coral-dominated gardens
+coral_dominated <- gardens_df %>%
+  group_by(garden_id, Phylum) %>%
+  summarise(total_density = sum(density, na.rm = TRUE)) %>%
+  group_by(garden_id) %>%
+  mutate(proportion = total_density / sum(total_density, na.rm = TRUE)) %>%
+  filter(Phylum == "Cnidaria") %>%
+  mutate(is_coral_dominated = proportion >= 0.7)
+
+# Output results
+kable(coral_dominated) %>% kable_styling(font_size = 7, latex_options = c("striped"))
+
+```
+
+> When comparing both df's one can see that only Dive 18 Gumpy Ridge has false for both, thus it is a true mixed forest. 
+
+# Plot exact transect length 
+
+> This code snippet is useful for looking at exact transect lengths - can be used to update the above values if needed. 
+CHECK IF THIS CAN BE USED INSTEAD ABOVE?? 
+
+```{r}
+
+###Finding transect length of each dive using a smooth line through time-sorted coordinates
+
+# Function to calculate the length of a smooth curve using SPLINE
+calculate_curve_length <- function(df) {
+  df <- df %>% arrange(time)
+  df$time_numeric <- as.numeric(df$time)
+  smooth_lat <- smooth.spline(df$time_numeric, df$Latitude..deg., spar = 1)
+  smooth_lon <- smooth.spline(df$time_numeric, df$Longitude..deg., spar = 1)
+  
+  time_seq <- seq(min(df$time_numeric), max(df$time_numeric), length.out = 100)
+  smooth_lat_values <- predict(smooth_lat, time_seq)$y
+  smooth_lon_values <- predict(smooth_lon, time_seq)$y
+  
+  smooth_coords <- data.frame(lat = smooth_lat_values, lon = smooth_lon_values)
+  calculate_distance <- function(lat1, lon1, lat2, lon2) {
+    distHaversine(cbind(lon1, lat1), cbind(lon2, lat2))
+  }
+  
+  sum(mapply(calculate_distance, head(smooth_coords$lat, -1), head(smooth_coords$lon, -1), 
+             tail(smooth_coords$lat, -1), tail(smooth_coords$lon, -1)))
+}
+
+# Apply the function to each dive
+lengths <- data.a %>%
+  group_by(Dive.Name) %>%
+  summarise(Length = calculate_curve_length(cur_data()))
+
+print(lengths) #looks good. I tried to double check if there is any value to looks out of range, doesnt correspond to the transect in Seatube (comparing dives)
+
+#Calculate total distance of all dives
+sum(lengths$Length)
+
+transect_lengths <- lengths %>%
+  mutate(Dive.Name = case_when(
+    Dive.Name == "EX2304_DIVE02 Big Bend Canyon" ~"2304_02" ,
+    Dive.Name == "EX2304_DIVE05 Lone Knoll Scarp" ~ "2304_05" ,
+    Dive.Name == "EX2304_DIVE07 Uliaga Mound Take 2" ~ "2304_07",
+    Dive.Name ==  "EX2304_DIVE08 Umnak Canyon" ~ "2304_08",
+    Dive.Name ==  "EX2306_Dive01 Kodiak Shelf" ~ "2306_01",
+    Dive.Name == "EX2306_Dive03 Giacomini Seamount" ~ "2306_03",
+    Dive.Name == "EX2306_Dive04 Quinn Seamount" ~ "2306_04" ,
+    Dive.Name == "EX2306_Dive05 Surveyor Seamount" ~ "2306_05" ,
+    Dive.Name ==  "EX2306_Dive06 Durgin Guyot" ~ "2306_06",
+    Dive.Name == "EX2306_Dive07 Deep Discover Dome" ~ "2306_07",
+    Dive.Name ==  "EX2306_Dive08 Denson Seamount" ~ "2306_08",
+    Dive.Name == "EX2306_Dive12 Noyes Canyon" ~ "2306_12" ,
+    Dive.Name ==  "EX2306_Dive14 Chatham Seep" ~ "2306_14" ,
+    Dive.Name ==  "EX2306_Dive15 Middleton Canyon" ~ "2306_15",
+    Dive.Name == "EX2306_Dive18 Gumby Ridge" ~"2306_18" ,
+    TRUE ~ Dive.Name
+  ))
+
+# To verify this function, I wanted to also plot the transects with coordinates and smooth-fitted line
+# Function to create a plot for a specific dive - mostly to check if the transect data is ok
+plot_transect_for_dive <- function(dive_id) {
+  df <- data.a %>% filter(Dive.Name == dive_id) %>% arrange(time)
+  df$time_numeric <- as.numeric(df$time)
+  
+  smooth_lat <- smooth.spline(df$time_numeric, df$Latitude..deg., spar = 1)
+  smooth_lon <- smooth.spline(df$time_numeric, df$Longitude..deg., spar = 1)
+  
+  time_seq <- seq(min(df$time_numeric), max(df$time_numeric), length.out = 100)
+  smooth_lat_values <- predict(smooth_lat, time_seq)$y
+  smooth_lon_values <- predict(smooth_lon, time_seq)$y
+  
+  smooth_coords <- data.frame(lat = smooth_lat_values, lon = smooth_lon_values)
+  
+  ggplot() +
+    geom_point(data = df, aes(x = Longitude..deg., y = Latitude..deg.), color = "blue", size = 2) +
+    geom_line(data = smooth_coords, aes(x = lon, y = lat), color = "red", size = 1) +
+    labs(title = paste("Transect Line for Dive:", dive_id), x = "Longitude", y = "Latitude") +
+    theme_minimal()
+}
+
+# Plots per dive
+unique(data.a$Dive.Name) #14 dives
+plot_transect_for_dive("EX2306_Dive01 Kodiak Shelf") #needs range of 1 
+plot_transect_for_dive("EX2306_Dive04 Quinn Seamount")
+plot_transect_for_dive("EX2306_Dive06 Durgin Guyot")
+plot_transect_for_dive("EX2306_Dive08 Denson Seamount")
+plot_transect_for_dive("EX2304_DIVE08 Umnak Canyon")
+plot_transect_for_dive("EX2306_Dive14 Chatham Seep") #Nope
+plot_transect_for_dive("EX2306_Dive18 Gumby Ridge")
+plot_transect_for_dive("EX2304_DIVE05 Lone Knoll Scarp") #needs range 1. There is one data point very far away, ignored in the length!
+plot_transect_for_dive("EX2306_Dive03 Giacomini Seamount")
+plot_transect_for_dive("EX2306_Dive05 Surveyor Seamount")
+plot_transect_for_dive("EX2306_Dive07 Deep Discover Dome")
+plot_transect_for_dive("EX2306_Dive15 Middleton Canyon")
+plot_transect_for_dive("EX2304_DIVE02 Big Bend Canyon")
+plot_transect_for_dive("EX2304_DIVE07 Uliaga Mound Take 2")
+
+#Works well except for Dive 14 2306 
+#Problem: for 14 it jumps but the reason is not clear to me, 
+# I checked with the below code to see if I can get lengths by doing fragments. The length is similar to the one in the above table (from the smooth fitting), so just take this as a good estimate
+
+#Dive 14 
+# irst Isolate the dive 
+data_d14 <- data.a %>% filter(Dive.Name == "EX2306_Dive14 Chatham Seep")
+
+# Plot the raw path
+ggplot(data_d14, aes(x = Longitude..deg., y = Latitude..deg., color = time)) +
+  geom_point(size = 2) +                     # Plot points
+  geom_line(aes(group = 1), color = "blue") + # Plot path as a line
+  labs(title = "Transect Path for Dive 14",
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal() +
+  scale_color_datetime()  # Color points by time if needed
+
+# Define time intervals
+start_time_1 <- ymd_hms("2023-09-07 21:00:00")
+end_time_1 <- ymd_hms("2023-09-07 23:59:59")
+start_time_2 <- ymd_hms("2023-09-07 18:00:00")
+end_time_2 <- ymd_hms("2023-09-07 20:59:59")
+
+# Filter data into two fragments
+fragment_1 <- data_d14 %>% filter(time >= start_time_1 & time <= end_time_1)
+
+fragment_2 <- data_d14 %>% filter(time >= start_time_2 & time <= end_time_2)
+
+# Plot the fragments
+ggplot() +
+  geom_point(data = fragment_1, aes(x = Longitude..deg., y = Latitude..deg.), color = "blue", size = 2) +
+  geom_line(data = fragment_1, aes(x = Longitude..deg., y = Latitude..deg.), color = "blue") +
+  geom_point(data = fragment_2, aes(x = Longitude..deg., y = Latitude..deg.), color = "red", size = 2) +
+  geom_line(data = fragment_2, aes(x = Longitude..deg., y = Latitude..deg.), color = "red") +
+  labs(title = "Transect Path for Dive 14 with Time Fragments",
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal()
+
+#Ok looks better, now smooth the line through the two fragments and combine to one length
+
+# Apply smoothing
+apply_spline_smoothing <- function(df, spar = 0.5) {
+  smooth_lat <- smooth.spline(df$time_numeric, df$Latitude..deg., spar = spar)
+  smooth_lon <- smooth.spline(df$time_numeric, df$Longitude..deg., spar = spar)
+  
+  df$lat_smooth <- predict(smooth_lat, df$time_numeric)$y
+  df$lon_smooth <- predict(smooth_lon, df$time_numeric)$y
+  return(df)
+}
+
+# Prepare data for smoothing
+fragment_1$time_numeric <- as.numeric(fragment_1$time)
+# Apply spline smoothing
+fragment_1_smooth <- apply_spline_smoothing(fragment_1, spar = 1.3)
+
+# Plot Fragment 1 with spline smoothing
+ggplot() +
+  geom_point(data = fragment_1, aes(x = Longitude..deg., y = Latitude..deg.), color = "blue", size = 2) +
+  geom_line(data = fragment_1, aes(x = Longitude..deg., y = Latitude..deg.), color = "blue") +
+  geom_line(data = fragment_1_smooth, aes(x = lon_smooth, y = lat_smooth), color = "red") +
+  labs(title = "Fragment 1: Transect Path with Spline Smoothing",
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal()
+
+# Prepare data for smoothing
+fragment_2$time_numeric <- as.numeric(fragment_2$time)
+fragment_2_smooth <- apply_spline_smoothing(fragment_2, spar = 0.5)
+
+# Plot Fragment 2 with spline smoothing
+ggplot() +
+  geom_point(data = fragment_2, aes(x = Longitude..deg., y = Latitude..deg.), color = "red", size = 2) +
+  geom_line(data = fragment_2, aes(x = Longitude..deg., y = Latitude..deg.), color = "red") +
+  geom_line(data = fragment_2_smooth, aes(x = lon_smooth, y = lat_smooth), color = "darkred") +
+  labs(title = "Fragment 2: Transect Path with Spline Smoothing",
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal()
+
+calculate_path_length <- function(df) {
+  # Ensure data is sorted by time
+  df <- df %>% arrange(time_numeric)
+  # Calculate distances between consecutive points
+  distances <- distHaversine(as.matrix(df[, c("lon_smooth", "lat_smooth")]))
+  # Sum the distances
+  total_length <- sum(distances, na.rm = TRUE)
+  return(total_length)
+}
+
+# Convert 'time' column to numeric for the function
+fragment_1$time_numeric <- as.numeric(fragment_1$time)
+fragment_2$time_numeric <- as.numeric(fragment_2$time)
+
+# Calculate path length for Fragment 1
+length_fragment_1 <- calculate_path_length(fragment_1_smooth)
+print(paste("Length of Fragment 1:", length_fragment_1, "meters"))
+
+# Calculate path length for Fragment 2
+length_fragment_2 <- calculate_path_length(fragment_2_smooth)
+print(paste("Length of Fragment 2:", length_fragment_2, "meters"))
+
+#For both in total:
+length_fragment_1+length_fragment_2 #600 m, so almost same as in the above table... dont know why the plot is so weird. But the value seems okay
+
+```
+
+# DIVERSITY INDICES
+
+## Alpha Diversity
+
+```{r}
+
+# Shannon's H' (for each dive)
+H <- tapply(data.a$Morphotype, data.a$Dive.Name, function(x) {
+  species_abundance <- table(x)
+  diversity_index <- diversity(species_abundance, index = "shannon")
+  return(diversity_index)
+})
+
+# Simpsons (for each dive)
+S <- tapply(data.a$Morphotype, data.a$Dive.Name, function(x) {
+  species_abundance <- table(x)
+  diversity_index <- diversity(species_abundance, index = "simpson")
+  return(diversity_index)
+})
+
+# Observed Richness
+richness <- tapply(data.a$Morphotype, data.a$Dive.Name, function(x) {
+  species_abundance <- table(x)
+  diversity_index <- specnumber(species_abundance)
+  return(diversity_index)
+})
+
+# Pielou's Evenness
+#Evenness is a measure of the relative abundance of the different species in the same area. 
+#Low J indicates that 1 or few species dominate the community
+evenness <- H/log(richness)
+
+# Create alpha diversity dataframe, include info about environmnent and locations
+div.df <- cbind(shannon = H, richness = richness, pielou = evenness, simps = S, ENV2)
+div.df$site <-  data.c[,1]
+
+kable(div.df) %>% kable_styling(font_size = 8, latex_options = c("striped"))
+
+# NOTE: Dive 8 2304 has only one morphotype, so NA
+
+# can also sort Locations by the median of 'shannon'
+# div.df$site <- with(div.df, reorder(site, shannon, median))
+
+plot.shan <- ggplot(div.df, aes(x = site, y = shannon, colour = depth, shape = as.factor(sed_consistency))) + 
+  geom_point(size = 3) +
+  scale_colour_viridis_c(option = "cividis", begin = 1, end = 0) +
+  ylab("Shannon's H") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"))  # Ensure margins are set
+#scale_shape_manual(values = c(15, 16, 17, 18, 19, 20, 21, 22, 23))  # Customize the shapes as needed
+plot.shan
+
+plot.rich <- ggplot(div.df, aes(x = site, y = richness, colour = depth, shape = as.factor(sed_consistency))) + 
+  geom_point(size = 3) +
+  scale_colour_viridis_c(option = "cividis", begin = 1, end = 0) +
+  ylab("Richness") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"))  # Ensure margins are set
+#scale_shape_manual(values = c(15, 16, 17, 18, 19, 20, 21, 22, 23))  # Customize the shapes as needed
+plot.rich
+
+plot.even <- ggplot(div.df, aes(x = site, y = pielou, colour = depth, shape = as.factor(sed_consistency))) + 
+  geom_point(size = 3) +
+  scale_colour_viridis_c(option = "cividis", begin = 1, end = 0) +
+  ylab("Pielous eveness") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"))  # Ensure margins are set
+#scale_shape_manual(values = c(15, 16, 17, 18, 19, 20, 21, 22, 23))  # Customize the shapes as needed
+plot.even
+
+```
+> Now, we explore the alpha diversity further
+
+```{r}
+
+# What impacts have the various environmental factors on the diversity? 
+
+# Define response variables
+responses <- c("shannon", "simps", "pielou", "richness")
+# Define predictor variables
+predictors <- c("depth", "sed_type", "sed_consistency", "temp", "slope", "feature")
+
+# Run linear models and print summaries
+lm_results <- lapply(responses, function(resp) {
+  cat("\n### Response:", resp, "###\n")
+  lapply(predictors, function(pred) {
+    cat("\nModel:", resp, "~", pred, "\n")
+    print(summary(lm(as.formula(paste(resp, "~", pred)), data = div.df)))
+  })})
+
+# Only sediment consistency has significant effect on alpha diversity evenness!
+
+#Plot with smoothing regression to show trend...
+depth.reg <- ggplot(div.df, aes(x = depth, y = shannon, colour = site)) +
+  geom_smooth(method = "lm", colour = "black", fill = "grey90") +
+  geom_point(size = 3) +
+  scale_colour_viridis_d(option = "magma", begin = 0.2, end = 0.8) +
+  xlab(bquote(Depth (m))) + 
+  ylab("Shannon's H'") +
+  ylim(0,3.5) +
+  theme_bw()
+depth.reg 
+
+sediments.reg <- ggplot(div.df, aes(x = sed_consistency, y = shannon, colour = site)) +
+  geom_point(size = 3) +
+  scale_colour_viridis_d(option = "magma", begin = 0.2, end = 0.8) +
+  xlab("Primary sediment consistency (m)") + 
+  ylab("Shannon's H'") +
+  ylim(0,3.5) +
+  theme_bw()
+sediments.reg 
+
+# Run linear models and print summaries
+anova_results <- lapply(responses, function(resp) {
+  cat("\n### Response:", resp, "###\n")
+  lapply(predictors, function(pred) {
+    cat("\nModel:", resp, "~", pred, "\n")
+    print(summary(aov(as.formula(paste(resp, "~", pred)), data = div.df)))
+  })})
+
+#Explore the values combined for hard, medium, soft...
+sed.plot <- ggplot(div.df, aes(x = sed_consistency, y = shannon, fill = as.factor(sed_consistency))) +
+  geom_boxplot(aes(fill = as.factor(sed_consistency))) +
+  geom_point(size = 3, aes(colour = site)) + 
+  scale_colour_viridis_d(option = "magma", begin = 0.2, end = 0.8) +
+  scale_fill_manual(values = c("grey60", "grey90", "black"), guide = FALSE) +
+  ylab("Shannon's H'") + 
+  xlab('')+
+  theme_bw() 
+sed.plot
+
+#Explore the values combined for hard, medium, soft...
+sed.plot2 <- ggplot(div.df, aes(x = sed_type, y = shannon, fill = as.factor(sed_type))) +
+  geom_boxplot(aes(fill = as.factor(sed_type))) +
+  geom_point(size = 3, aes(colour = site)) + 
+  scale_colour_viridis_d(option = "magma", begin = 0.2, end = 0.8) +
+  #scale_fill_manual(guide = FALSE) +
+  ylab("Shannon's H'") + 
+  xlab('')+
+  theme_bw() 
+sed.plot2 
+
+# NOTE: When adjusting the depth bins there was no obvious difference 
+
+```
+
+> Summary of the alpha diversity: Only sediments had a significant effect on the within-side diversities. Hard substrates show the highest Shannon. Uliaga seamount is the most diverse site, and Umnak Canyon the lowest with a index of 0 with only 1 morphotype. There was no clear trend on feature, but a slight negative trend with depth. 
+
+## Beta Diversity
+
+```{r}
+
+# To calculate Beta diversity (across sites) pairwise dissimilarities/distances need to be calculated
+# Prepare data: Convert morphotype data to presence-absence matrix
+SPE.pa <- SPE2
+SPE.pa[SPE.pa > 0] <- 1
+
+# Calculate beta diversity using Bray-Curtis dissimilarity
+bray.df <- vegdist(SPE.pa, method = "bray")
+# Optionally, convert dissimilarity matrix to dataframe
+bray.df <- as.data.frame(as.matrix(bray.df))
+
+# Set the row names of the distance matrix to Dive Names
+rownames(bray.df) <- data.c$Dive.Name
+colnames(bray.df) <- data.c$Dive.Name
+
+#bray.df <- cbind(bray.df, ENV2)
+
+# The matrix can be further used to explore how distant sites are. 
+# 1) Are sites more similar that are closer to each other? GEOGRAPHIC DISTANCE
+
+# Create a list to store the first coordinate values and Dive names for each Dive site
+first_coordinates_list <- lapply(divesites, function(dive_site) {
+  # Extract the first coordinate values for the Dive site
+  first_coordinates <- data.a %>%
+    filter(Dive.Name == dive_site) %>%
+    slice(1) %>%
+    dplyr::select(Dive.Name, Latitude..deg., Longitude..deg.)
+  return(first_coordinates)
+  })
+
+# Extract latitude and longitude values from the list of data frames
+coordinates <- lapply(first_coordinates_list, function(df) df[, c("Longitude..deg.", "Latitude..deg.")])
+# Convert the list of coordinates to a matrix
+coordinates_matrix <- do.call(rbind, coordinates)
+# Calculate distances between points using the distm function with Haversine formula (for km)
+distance_matrix <- distm(coordinates_matrix)
+
+rownames(distance_matrix) <- data.c$Dive.Name
+colnames(distance_matrix) <- data.c$Dive.Name
+
+# Print the distance matrix - if wanted
+# print(distance_matrix)
+heatmap(distance_matrix)
+# Convert depth_distance_matrix to long format
+geo_long <- as.data.frame(as.table(distance_matrix))
+colnames(geo_long) <- c("Site1", "Site2", "Geo")
+# Convert bray_curtis_matrix to long format
+bray_long <- as.data.frame(as.table(as.matrix(bray.df)))
+colnames(bray_long) <- c("Site1", "Site2", "Bray_Curtis")
+# Merge the dataframes on Site1 and Site2
+combined_df <- merge(geo_long, bray_long, by = c("Site1", "Site2"))
+# Remove rows where Site1 == Site2 (comparisons with self)
+combined_df <- combined_df[combined_df$Site1 != combined_df$Site2, ]
+
+ggplot(combined_df, aes(x = Geo, y = Bray_Curtis)) +
+  geom_point(aes(color = Bray_Curtis)) +  # Points colored by Bray-Curtis value
+  geom_smooth(method = "lm", se = TRUE, color = "black") +  # Linear regression line
+   stat_cor(method = "pearson", label.x = 1500000, label.y = 0.55) +  # Add correlation coefficient (r) and p-value
+  labs(x = "Geographic Distance (m)", y = "Bray-Curtis Dissimilarity") +
+  theme_minimal() +
+  scale_color_viridis_c()  # Color scale for Bray-Curtis dissimilarity
+
+# 2) Are sites more similar that share similar depths? DEPTH DISTANCE
+
+# Create an empty matrix to store the depth distances
+depth_distance_matrix <- matrix(NA, nrow = nrow(data.c), ncol = nrow(data.c)) # using data.c as this has the average depths for each site ready
+
+# Fill the matrix with depth differences
+for (i in 1:nrow(data.c)) {
+  for (j in 1:nrow(data.c)) {
+    # Calculate the absolute difference in depths between locations i and j
+    depth_distance_matrix[i, j] <- abs(data.c$depth[i] - data.c$depth[j])
+  }}
+
+# Set the row names of the distance matrix to Dive Names
+rownames(depth_distance_matrix) <- data.c$Dive.Name
+colnames(depth_distance_matrix) <- data.c$Dive.Name
+
+# Convert depth_distance_matrix to long format
+depth_long <- as.data.frame(as.table(depth_distance_matrix))
+colnames(depth_long) <- c("Site1", "Site2", "Depth")
+# Merge the dataframes on Site1 and Site2
+combined_df2 <- merge(depth_long, bray_long, by = c("Site1", "Site2"))
+# Remove rows where Site1 == Site2 (comparisons with self)
+combined_df2 <- combined_df2[combined_df2$Site1 != combined_df2$Site2, ]
+
+ggplot(combined_df2, aes(x = Depth, y = Bray_Curtis)) +
+  geom_point(aes(color = Bray_Curtis)) +  # Points colored by Bray-Curtis value
+  geom_smooth(method = "lm", se = TRUE, color = "black") +  # Linear regression line
+   stat_cor(method = "pearson", label.x = 2000, label.y = 0.55) +  # Add correlation coefficient (r) and p-value. TEST: Linear regression, because the data is pairwaise (testing the relationship between two variables)
+  labs(x = "Depth Distance (m)", y = "Bray-Curtis Dissimilarity") +
+  theme_minimal() +
+  scale_color_viridis_c()  # Color scale for Bray-Curtis dissimilarity
+
+```
+
+> Summary of Beta Diversity. Geographic and depth distance have an impact on the beta diversity. The similarity increases when the sites are geographically closer, and even stronger when the depth distance is considered. 
+
+# COMMUNITY COMPOSITION
+
+## PcOA 
+
+```{r}
+
+pcoa.bray <- cmdscale(bray.df, k = 2, eig = T)
+# print(pcoa.bray) #explore output if wanted
+
+# extract axis positions for each site from cmdscale object and create a dataframe for plotting
+pcoa.bray.plotting <- as.data.frame(pcoa.bray$points)
+colnames(pcoa.bray.plotting) <- c("pcoa1", "pcoa2")
+
+# Create alpha diversity dataframe, include info about environment and locations
+pcoa.bray.plotting <- cbind(pcoa.bray.plotting, ENV2)
+
+# calculate the proportion of variance in the data which is explained by the first two PCoA axes
+pcoa.bray$eig[1]/(sum(pcoa.bray$eig))
+pcoa.bray$eig[2]/(sum(pcoa.bray$eig))
+
+pcoa.bray.plotting$site <- data.c$Dive.Name
+pcoa.bray.plotting$watermass <- data.c$watermass
+
+ggplot(pcoa.bray.plotting, aes(x = pcoa1, y = pcoa2, label=site, color=site, shape=watermass)) +
+  geom_point(size = 4) +
+  #scale_shape_manual(values = c(15, 16, 17, 18, 19))+ 
+  #ggtitle("PCA of Bray Curtis Dissimilarities") +
+  geom_text_repel(min.segment.length = 0, size=4, box.padding = 1) +
+  labs(col = "Site", shape = "Water Mass",
+       x = "PCoA1",
+       y = "PCoA2", 
+       size = 5) +
+  theme_linedraw() +
+  # Confidence ellipses
+  # stat_ellipse(aes(col = current), level = 0.95, linetype = "dashed") +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text (size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background= element_rect(colour="black"),
+        legend.position = "right")
+
+# Test the significance of watermass and other factors on the distances
+# TEST: Adonis2/PERMANOVA. Multivariate test for distance matrix as bray curtis e.g. 
+variables <- c("depth", "watermass", "feature", "slope","rugosity","eastness", "sed_consistency","lon","lat")
+results <- lapply(variables, function(var) adonis2(as.formula(paste("bray.df ~", var)), data = data.c))
+results
+
+```
+
+## Transform data
+
+> To continue with the ordination methods, the environmnetal and species data needs to be transformed. This is the case when count data is used, and many zeros are present e.g. Most commonly used are Hellinger transformation for species data, and standardisation for environmental data. 
+
+```{r, warning=FALSE}
+
+# Morphotype data
+# Hellinger transformation
+
+# SPE is the "full" data, so all annotations
+SPE.hel <- decostand(SPE, method="hellinger")
+plotNormalHistogram(SPE.hel) # checking the distribution
+
+#SPE2 is the aggregated data, grouped by sites
+SPE2.hel <- decostand(SPE2, method="hellinger")
+plotNormalHistogram(SPE2.hel) # checking the distribution
+
+# Hellinger pre-transformation of the species data 
+# Compute square root of relative abundances per site
+SPE.hel3 <-decostand(SPE.fam, method="hellinger") # full data, not grouped by site 
+SPE.hel3$site <- data.b$Dive.Name 
+SPE.hel3 <- SPE.hel3[SPE.hel3$site != "2306_08", ]
+SPE.hel3 <- SPE.hel3 %>% dplyr::select(-site) # remove the site column again
+
+# Environmental data
+# Standardization
+
+env.z <- decostand(ENV, method="standardize") # After Borcard 
+env.z <- na.omit(env.z) # remove the rows with NAs, that is no values. This removes the dive EX2306 Dive 08 as there was no Backscatter data
+
+env2.z <- decostand(ENV2, method= "standardize") # After Borcard 
+env2.z <- na.omit(env2.z) # remove the rows with NAs, that is no values. This removes the dive EX2306 Dive 08 as there was no Backscatter data
+
+```
+
+## Cluster analysis
+
+### Morphotype clustering 
+
+> The cluster analysis is an exploratory data analysis, and can be used to group a set of data into clusters. First, I am exploring the species data (morphotype-level) to assess clustering patterns among different morphotypes per site. The dissimilarity between morphotypes is computed using different clustering methods to find the best fit. I am using the site grouped dataset (SPE2) because I want to see which sites share similar morphotype compositions. 
+
+```{r}
+
+# First: Species data clustering
+# Used Borcard's suggestion to explore the species data 
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Compute matrix of chord distance among morphotypes
+spe.ch <- as.matrix(vegdist(SPE2.hel, "euc")) 
+rownames(spe.ch) <- rownames(SPE2.hel)  # Ensure meaningful labels if available
+colnames(spe.ch) <- rownames(SPE2.hel) 
+spe.ch <- as.dist(spe.ch)
+
+# Compute different hierarchical clustering methods
+spe.ch.single <- hclust(spe.ch, method = "single")
+spe.ch.complete <- hclust(spe.ch, method = "complete")
+spe.ch.UPGMA <- hclust(spe.ch, method = "average") # UPGMA (best cophenetic correlation)
+spe.ch.ward <- hclust(spe.ch, method = "ward.D2")
+
+# Plot dendrograms
+par(mfrow = c(2,2))  # Arrange plots in a grid
+plot(spe.ch.single, main = "Chord - Single linkage", cex = 0.8)
+plot(spe.ch.complete, main = "Chord - Complete linkage", cex = 0.8)
+plot(spe.ch.UPGMA, main = "Chord - UPGMA", cex = 0.8)
+plot(spe.ch.ward, main = "Chord - Ward", cex = 0.8)
+par(mfrow = c(1,1))  # Reset plot layout
+
+# Compute cophenetic correlation coefficients to evaluate clustering methods
+spe.ch.single.coph <- cophenetic(spe.ch.single)
+spe.ch.comp.coph <- cophenetic(spe.ch.complete)
+spe.ch.UPGMA.coph <- cophenetic(spe.ch.UPGMA)
+spe.ch.ward.coph <- cophenetic(spe.ch.ward)
+
+# Print correlation values
+cor(spe.ch, spe.ch.single.coph)  # Single Linkage
+cor(spe.ch, spe.ch.comp.coph)  # Complete Linkage
+cor(spe.ch, spe.ch.UPGMA.coph)  # UPGMA (expected highest)
+cor(spe.ch, spe.ch.ward.coph)  # Ward's
+
+# Highest correlation found in the UPGMA clustering with 0.88
+
+# Cluster validation using bootstrap resampling
+spech.pv <- pvclust(t(SPE2.hel), method.hclust = "average", method.dist = "euc", parallel = TRUE)
+plot(spech.pv)
+
+# Highlight clusters with high AU p-values (≥0.95 = significant)
+pvrect(spech.pv, alpha = 0.95, pv = "au")
+
+# Alternative: Determine optimal number of clusters using silhouette method
+# Define a range of k values to test
+k_values <- 2:14
+sil_widths <- numeric(length(k_values))
+
+# Compute silhouette width for each k
+for (i in seq_along(k_values)) {
+  cluster_assignments <- cutree(spe.ch.UPGMA, k = k_values[i])  # Get cluster labels
+  sil <- silhouette(cluster_assignments, spe.ch)  # Compute silhouette scores
+  sil_widths[i] <- mean(sil[, 3])  # Store average silhouette width
+}
+
+# Plot silhouette width vs. number of clusters
+plot(k_values, sil_widths, type = "b", pch = 19, frame = FALSE,
+     xlab = "Number of Clusters (k)", ylab = "Average Silhouette Width",
+     main = "Optimal Cluster Selection via Silhouette Width")
+abline(v = k_values[which.max(sil_widths)], col = "red", lty = 2)  # Mark optimal k
+
+cluster_membership <- cutree(spe.ch.UPGMA, k = 7)
+table(cluster_membership)
+
+# Final reordered dendrogram with chosen clusters
+spe.chwo <- reorder.hclust(spe.ch.UPGMA, spe.ch)
+plot(spe.chwo, hang = 0, xlab = "Cluster Groups", ylab = "Height", main = "Chord - UPGMA (Reordered)")
+rect.hclust(spe.chwo, k = 7)  # Highlight clusters (adjusted k to 7 according to the previous sillhouette plot)
+
+#Rows are dive IDs:
+#1) 2304_02 
+#2) 2304_05       
+#3) 2304_07      
+#4) 2304_08      
+#5 2306_01      
+#6 2306_03       
+#7 2306_04      
+#8 2306_05      
+#9 2306_06      
+#10 2306_07  
+#11 2306_08
+#12 2306_12       
+#13 2306_14       
+#14 2306_15     
+#15 2306_18 
+
+```
+
+### Environmental clustering 
+
+> Continuing with environmental data. Which sites share cluster together that share similar environmental conditions? Does this correspond to geography? How does it relate to the species clusters? 
+
+```{r}
+
+# Environmental data clustering analysis
+# Ensure NA rows are removed for environmental data
+
+# Compute the distance matrix using Euclidean distance
+env.ch <-as.matrix(vegdist(na.omit(env2.z), "euc")) # Attach site names to object of class 'dist'/ Take out Dive 2306 08
+rownames(env.ch) <- c("2304_02","2304_05", "2304_07" , "2304_08", "2306_01" ,"2306_03", "2306_04", "2306_05", "2306_06" ,"2306_07", "2306_12", "2306_14" ,"2306_15", "2306_18") #w/o Dive 2306 8 as this one has missing env data
+colnames(env.ch) <- c("2304_02","2304_05", "2304_07" , "2304_08", "2306_01" ,"2306_03", "2306_04", "2306_05", "2306_06" ,"2306_07", "2306_12", "2306_14" ,"2306_15", "2306_18")
+env.ch <- as.dist(env.ch)
+
+# Compute agglomerative clustering methods
+env.ch.single <- hclust(env.ch, method = "single")
+env.ch.complete <- hclust(env.ch, method = "complete")
+env.ch.UPGMA <- hclust(env.ch, method = "average")  # UPGMA
+env.ch.ward <- hclust(env.ch, method = "ward.D2")
+
+# Plot dendrograms for different methods
+par(mfrow = c(2, 2))  # Arrange plots in a grid
+plot(env.ch.single, main = "Chord - Single linkage")
+plot(env.ch.complete, main = "Chord - Complete linkage")
+plot(env.ch.UPGMA, main = "Chord - UPGMA")
+plot(env.ch.ward, main = "Chord - Ward")
+par(mfrow = c(1, 1))  # Reset plot layout
+
+# Compute cophenetic correlations to assess clustering method
+env.ch.single.coph <- cophenetic(env.ch.single)
+env.ch.comp.coph <- cophenetic(env.ch.complete)
+env.ch.UPGMA.coph <- cophenetic(env.ch.UPGMA)
+env.ch.ward.coph <- cophenetic(env.ch.ward)
+
+# Print correlation values for each method
+cor(env.ch, env.ch.single.coph)  # Single Linkage
+cor(env.ch, env.ch.comp.coph)    # Complete Linkage
+cor(env.ch, env.ch.UPGMA.coph)   # UPGMA (highest correlation)
+cor(env.ch, env.ch.ward.coph)    # Ward's
+
+# Perform p-value bootstrapping to validate clusters (approximate unbiased p-values)
+envch.pv <- pvclust(t(env2.z), method.hclust = "average", method.dist = "eucl", parallel = TRUE)
+plot(envch.pv)
+pvrect(envch.pv, alpha = 0.95, pv = "au")  # Highlight significant clusters (AU p-value ≥ 0.95)
+
+# Reorder the dendrogram based on environmental dissimilarities
+env.chwo <- reorder.hclust(env.ch.UPGMA, env.ch)
+plot(env.chwo, hang = 0, xlab = "3 groups", ylab = "Height", main = "Chord - UPGMA (Reordered)")
+rect.hclust(env.chwo, k = 3)  # Highlight 3 clusters
+
+```
+
+> To further explore clustering of species and how they group by similarity or dissimilarity across the sites I perfomed a PCA. Also a PCA on environmental data: To explore how environmental variables group together across the sites. Then a Procrustes Analysis: To assess if the species clustering and environmental clustering are significantly correlated. If yes, proceed with multivariate analysis. 
+
+## Explorative PCA
+
+```{r}
+
+# PCA on Hellinger-transformed species data (SPE.hel)
+# Need to delete the Dive 08 as NA in env data
+SPE.hel$site <- data.b$Dive.Name 
+SPE.hel <- SPE.hel[SPE.hel$site != "2306_08", ]
+SPE.hel <- SPE.hel %>% dplyr::select(-site) # remove the site column again
+# Now the morphotype for Dive 08 will be only zeros so I need to delete this column with na.omit
+spe.pca <- prcomp(SPE.hel[, colSums(SPE.hel != 0) > 0], scale = TRUE)  # You can scale if needed
+# PCA plot for species data
+biplot(spe.pca, main = "PCA of Species Data") # You can adjust the biplot options to visualize axes and vectors better
+#screeplot(spe.pca) 
+
+# PCA on Environmental Data (env.z standardized)
+env.pca <- prcomp( env.z[, sapply(env.z, is.numeric)], scale = TRUE) # exclude the previously added site and water mass and feature columns (not needed here anyways) 
+biplot(env.pca, main = "PCA of Environmental Data") # Similar to species PCA, biplot shows the principal components
+#screeplot(env.pca)
+
+```
+
+### Procustes Analysis
+
+> Procrustes analysis tests whether the species composition (PCA on species data) and environmental variables (PCA on environmental data) are significantly correlated. If they are, it suggests that the species distributions are likely influenced by the environmental gradients in your dataset. A significant correlation means that the patterns in species composition are in some way "shaped" by the environmental factors, making CCA a suitable next step.
+
+```{r, warning=FALSE}
+
+# 2. Perform Procrustes Analysis
+#Test significance  
+env.Procrustes.sign <- protest(env.pca, spe.pca, scores="sites") # p < 0.001
+env.Procrustes.sign
+
+```
+
+> Procrustes shows a moderate correlation between species and env data. R = 0.31. Significance (p < 0.001) indicates that the relationship between the environmental and species data is not random. The result suggests that while the correlation is moderate, the association is still meaningful and statistically reliable. Proceed with multivariate analysis (CCA)
+
+# CCA
+
+> Using CCA (Canonical Correspondence Analysis) as this assumes unimodal relationships instead of linear. In nature, this is probably a more realistic assumption. 
+
+## Morphotype-level analysis
+
+```{r}
+
+# Using species data (Hellinger transformed) of the full wide dataset 
+
+# 1) Run a full model 
+# This includes all variables that are possible to include (excluding site, lat, lon, watermass). Here it is very important that all NA's are removed, and rows are the same! To double check, use nrow on both df's
+
+cca_full <- cca(SPE.hel ~ depth + slope + eastness + bs + rugosity + northness + sed_consistency, data = env.z, scale = TRUE) # as a reminder, dive 08 EX2306 is excluded as NA's in backscatter
+anova(cca_full, by = "margin") #test each variables significance for the model
+anova(cca_full) # The model is significant
+
+# Test the significance of individual canonical axes
+anova(cca_full, by = "axis")
+summary(cca_full)
+
+# Function to ...
+calculate_proportion_explained <- function(cca_model) {
+  constrained_variation <- cca_model$tot.chi - cca_model$CA$tot.chi
+  total_variation <- cca_model$tot.chi
+  proportion_explained <- constrained_variation / total_variation
+  return(proportion_explained)}
+
+calculate_proportion_explained(cca_full) # How much does the full model explain? About 9.86% of the total variation in species composition. This sounds low, but in ecological, marine studies not uncommon. It just means a lot more is shaping the communities, = the unconstrained variation (e.g. species interactions, dispersal strategies etc.)
+
+# Check for collinearity of variables - Variance Inflation Factors
+vif.cca(cca_full) 
+
+#VIF < 5: No serious collinearity; VIF 5–10: Moderate collinearity, consider reducing variables; VIF > 10: High collinearity, remove or combine correlated predictors - So all the environmental variables are good to use. 
+
+# Run a second full model, also including site and watermass (just to test their influence on the test)
+
+# First add the watermass as a factor to env.z 
+data.b <- data.b[data.b$Dive.Name != "2306_08", ] # first need to also delete Dive 08 EX2306
+env.z$site <- as.factor(data.b$Dive.Name) # Add the feature information
+env.z$watermass <- as.factor(data.b$watermass) # Add the feature information
+env.z$feature <- as.factor(data.b$feature) # Add the feature information
+
+cca_full2 <- cca(SPE.hel ~ slope + eastness + bs + rugosity + sed_consistency + northness + depth + watermass, data = env.z, scale = TRUE)
+
+vif.cca(cca_full2) 
+# NOTE: Watermass is categorical, so it appears as individual variables here.
+# Depth and watermass are highly correlated - which is to be expected, but won't be used in addition to watermass anyways.But we can check if it adds additional information to the model:
+
+anova(cca_full2, by = "terms") 
+coef(cca_full2) # coefficients show how much each environmental variable contributes to each canonical axis (CCA1, CCA2, etc.), which represent gradients in species composition. Larger absolute values indicate stronger relationships between the variable and the axis. Positive/negative values show the direction of the relationship.
+
+calculate_proportion_explained(cca_full2)  # The second full model, that includes also water mass and site, explains much more (16%) - which is to be expected. 
+
+```
+
+> Summary so far from the two full models: Depth and water masses are the dominant drivers of community structure. Rugosity & slope also play key roles, but to a lesser extent. Each water mass level affects species composition differently, which is why VIF listed them separately. Next I will explore the conditioned models, to explore each variable separately 
+
+```{r, warning=FALSE}
+
+# All variables to check for a conditioned model. For fun also including site here
+env_vars <- c("depth", "site", "slope", "eastness", "rugosity", "bs", "sed_consistency", "feature", "watermass")
+
+# Create a list to store CCA results
+cca_results <- list()
+
+# Run CCA for each variable as a condition
+for (var in env_vars) {
+  formula <- as.formula(paste("SPE.hel ~", paste(setdiff(env_vars, var), collapse = " + "), 
+                              "+ Condition(", var, ")"))
+  cca_results[[var]] <- cca(formula, data = env.z, scale = TRUE)
+}
+
+# Now extract and print the variance explained (inertia) for each model
+for (var in env_vars) {
+  inertia <- cca_results[[var]]$CCA$tot.chi  # Total inertia from the CCA model
+  constrained_inertia <- cca_results[[var]]$CCA$eig[1]  # Inertia explained by the constrained axis
+  variation_explained <- (constrained_inertia / inertia) * 100
+  cat("Variation explained by", var, ":", variation_explained, "%\n") # Percent (explained) inertia 
+}
+
+```
+
+> A bit of explanation to the above: The variation explained differs from the results from the previous ANOVA. This is because the CCA approach looks at the total variation explained by all the predictors and how each variable explains variation in the context of all others. When conditioning on one variable, the variation explained by that variable can appear smaller because some of the variation is explained by the other variables, and some is shared or redistributed among them. The ANOVA approach tests the marginal significance of each variable independently, so depth might show strong significance and low p-value because it *independently* explains a lot of variation in the species data.
+Basically:
+
+* *ANOVA* = Statistical Significance (which variables influence species composition significantly?) 
+* *PERCENT INERTIA* = Explained Variation (relative importance of each environmental variable in explaining species composition)
+
+> Now we will run the model we want to plot:
+
+```{r, warning=FALSE}
+
+# Remove all variables that are not added based on the results above. I do not include watermass, feature, site (because that doesn't make sense to include if I want to see the clustering, should not bias the ordination, was just used to test the effect. And watermass and feature are categorical, so each mass has a different influence). Also bs and eastness, northness because they have a very weak influence (see the coef results from above, first two CCA axes. <0.04 (or -0.04) in at least one of the axes. The other variables are above that, so I decided to only take those. When I run the model and plotted it including the above variables, they are very close to the center too, as expected.  
+
+# Since this is the case, we could include Dive EX2306 08 again, since we don't end up using backscatter. I decided not to, as it doesn't change the outcome a lot, this dive is just missing from the CCA. I run this separately just to confirm, and the clustering and statistics are similar. Dive 08 clusters also with their respective water mass - PDW - and is close to the other PDW site, Quinn Seamount (EX2306 04), but also close to the other seamounts, as Quinn too. PDW and PSIW are a bit overlapping in both models. 
+
+cca_model <- cca(SPE.hel ~ slope + rugosity + sed_consistency + depth, data = env.z, scale = TRUE)
+calculate_proportion_explained(cca_model) 
+
+scores.cca <- vegan::scores(cca_model, display=c("sites","cn","bp","sp")) # sites, centroids, biplot, species
+cca.sites <- data.frame(scores.cca$sites)
+cca.biplot <- data.frame(scores.cca$biplot)
+cca.species <- data.frame(scores.cca$species) # get all morphotypes
+cca.species <- cca.species[which(abs(cca.species$CCA1) > 0.05 | abs(cca.species$CCA2) > 0.05),] # filter species based on scores
+
+#add sites name
+cca.sites$site <- data.b$Dive.Name # Add the feature information
+cca.sites$feature <- as.factor(data.b$feature) # Add the feature information
+cca.sites$watermass <- as.factor(data.b$watermass) # Add the feature information
+cca.sites$sed_consistency <- as.factor(data.b$sed_consistency) # Add the feature information
+
+# Convert row names to a column
+cca.species$Morphotype <- rownames(cca.species)
+# Merge with taxa_df using cleaned species names
+cca_full_df <- merge(cca.species, taxa, by = "Morphotype")
+
+#Maybe add only significant species:
+# Step 1: Run envfit to test significance of species with CCA axes
+species_fit <- envfit(cca_model, SPE.hel, perm = 999)
+# Step 2: Extract species with significant p-values
+significant_species <- species_fit$vectors$pvals < 0.05
+significant_species_names <- rownames(species_fit$vectors$arrows)[significant_species]
+# Step 3: Filter your species data (cca_full_df) to include only significant species
+cca_full_df <- cca_full_df[cca_full_df$Morphotype %in% significant_species_names, ]
+
+# Plotting the biplot. I am using water mass as shape, since they were strongly significant. And also explained the highest variation in the model. 
+
+plot.cca <- ggplot(cca.sites, aes(x = CCA1, y = CCA2)) +
+  geom_point(aes(x = CCA1, y = CCA2,
+                 col = site, shape = watermass,  alpha = 0.9),
+             size = 3) + 
+  scale_alpha(range = c(0, 1), guide = "none") + # Hide alpha from the legend
+  geom_hline(yintercept=0, linetype="dotted") +
+  geom_vline(xintercept=0, linetype="dotted") +
+  geom_segment(data = cca.biplot,
+               aes(x = 0, xend = CCA1*2, y = 0, yend = CCA2*2),
+               arrow=arrow(length=unit(0.01,"npc")),
+               color = "#C20000") +
+  geom_text(data = cca.biplot,
+            aes(x = CCA1*2.5, y = CCA2*2.5, label=rownames(cca.biplot)), 
+            size = 4,
+            color = "#C20000") +
+  stat_ellipse(aes(fill=watermass), level = 0.95, alpha=0.3, linetype = "dashed") +
+  geom_text(data = cca_full_df, aes(x = CCA1, y = CCA2, label = Morphotype),
+            position = position_jitter(width = 0.5, height = 0.5), size = 3, color = "black") +  # Jitter text
+  labs(col = "Site", shape = "Water Mass or Current",
+       x = "CCA1",
+       y = "CCA2", 
+       size = 5) +
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text (size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background= element_rect(colour="black"),
+        legend.position = "right")
+
+plot.cca
+
+```
+
+## Family-level analysis
+
+> Since the morphotype assignments might also influence the analysis (as for example more sponges are broadly identified to genus or family, and corals are better resolved in that context), lets also do the same on the family level data. 
+
+```{r, warning=FALSE}
+
+# First test the full model as above
+
+# 1) Run a full model 
+# This includes all variables that are possible to include (excluding site, lat, lon, watermass). Here it is very important that all NA's are removed, and rows are the same! To double check, use nrow on both df's
+
+cca_full_family <- cca(SPE.hel3 ~ depth + slope + eastness + bs + rugosity + northness + sed_consistency, data = env.z, scale = TRUE)
+anova(cca_full, by = "margin") #test each variables significance for the model
+anova(cca_full) 
+
+# Test the significance of individual canonical axes
+anova(cca_full_family, by = "axis")
+summary(cca_full_family)
+
+calculate_proportion_explained(cca_full_family) 
+
+vif.cca(cca_full_family) # checking again the collinearity, but should be same as before
+
+# Run a second full model, also including site and watermass (just to test their influence on the test)
+
+# First add the watermass as a factor to env.z 
+env.z$site <- as.factor(data.b$Dive.Name) # Add the feature information
+env.z$watermass <- as.factor(data.b$watermass) # Add the feature information
+env.z$feature <- as.factor(data.b$feature) # Add the feature information
+
+cca_full2_family <- cca(SPE.hel3 ~ slope + eastness + bs + rugosity + sed_consistency + northness + depth + watermass, data = env.z, scale = TRUE)
+
+anova(cca_full2_family, by = "terms") 
+coef(cca_full2) # coefficients show how much each environmental variable contributes to each canonical axis (CCA1, CCA2, etc.), which represent gradients in species composition. Larger absolute values indicate stronger relationships between the variable and the axis. Positive/negative values show the direction of the relationship.
+
+# See how much variation each variable explains
+cca_results <- list()
+
+# Run CCA for each variable as a condition
+for (var in env_vars) {
+  formula <- as.formula(paste("SPE.hel3 ~", paste(setdiff(env_vars, var), collapse = " + "), "+ Condition(", var, ")"))
+  cca_results[[var]] <- cca(formula, data = env.z, scale = TRUE)
+}
+
+# Now extract and print the variance explained (inertia) for each model
+for (var in env_vars) {
+  inertia <- cca_results[[var]]$CCA$tot.chi  # Total inertia from the CCA model
+  constrained_inertia <- cca_results[[var]]$CCA$eig[1]  # Inertia explained by the constrained axis
+  variation_explained <- (constrained_inertia / inertia) * 100
+  cat("Variation explained by", var, ":", variation_explained, "%\n") # Percent (explained) inertia 
+}
+
+# Reduced model for the biplot
+cca_model_family <- cca(SPE.hel3 ~ slope + rugosity + sed_consistency + depth, data = env.z, scale = TRUE)
+calculate_proportion_explained(cca_model_family) 
+
+scores.cca <- vegan::scores(cca_model_family, display=c("sites","cn","bp","sp")) # sites, centroids, biplot, species
+cca.sites <- data.frame(scores.cca$sites)
+cca.biplot <- data.frame(scores.cca$biplot)
+cca.species <- data.frame(scores.cca$species) # get all families
+cca.species <- cca.species[which(abs(cca.species$CCA1) > 0.05 | abs(cca.species$CCA2) > 0.05),] # filter species based on scores
+
+#add sites name
+cca.sites$site <- data.b$Dive.Name # Add the feature information
+cca.sites$feature <- as.factor(data.b$feature) # Add the feature information
+cca.sites$watermass <- as.factor(data.b$watermass) # Add the feature information
+cca.sites$sed_consistency <- as.factor(data.b$sed_consistency) # Add the feature information
+
+# Convert row names to a column
+cca.species$Family <- rownames(cca.species)
+# Merge with taxa_df using cleaned species names
+cca_full_df <- merge(cca.species, taxa, by = "Family")
+
+#Maybe add only significant species:
+# Step 1: Run envfit to test significance of species with CCA axes
+species_fit <- envfit(cca_model_family, SPE.hel3, perm = 999)
+# Step 2: Extract species with significant p-values
+significant_species <- species_fit$vectors$pvals < 0.01
+significant_species_names <- rownames(species_fit$vectors$arrows)[significant_species]
+# Step 3: Filter your species data (cca_full_df) to include only significant species
+cca_full_df <- cca_full_df[cca_full_df$Family %in% significant_species_names, ]
+
+# Plotting the biplot. I am using water mass as shape, since they were strongly significant. And also explained the highest variation in the model. 
+
+plot.cca_family <- ggplot(cca.sites, aes(x = CCA1, y = CCA2)) +
+  geom_point(aes(x = CCA1, y = CCA2,
+                 col = site, shape = watermass,  alpha = 0.9),
+             size = 3) + 
+  scale_alpha(range = c(0, 1), guide = "none") + # Hide alpha from the legend
+  geom_hline(yintercept=0, linetype="dotted") +
+  geom_vline(xintercept=0, linetype="dotted") +
+  geom_segment(data = cca.biplot,
+               aes(x = 0, xend = CCA1*2, y = 0, yend = CCA2*2),
+               arrow=arrow(length=unit(0.01,"npc")),
+               color = "#C20000") +
+  geom_text(data = cca.biplot,
+            aes(x = CCA1*2.5, y = CCA2*2.5, label=rownames(cca.biplot)),
+            size = 4,
+            color = "#C20000") +
+  geom_text(data = cca_full_df, aes(x = CCA1, y = CCA2, label = Family),
+            position = position_jitter(width = 0.5, height = 0.5), size = 3, color = "black") +  # Jitter text
+  labs(col = "Site", shape = "Water Mass or Current",
+       x = "CCA1",
+       y = "CCA2", 
+       size = 5) +
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text (size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background= element_rect(colour="black"),
+        legend.position = "right")
+
+plot.cca_family
+
+```
+
+# Optional: MAP 
+
+```{r}
+
+#This needs to be run in console because there is prompt asking for the download of the underlying data (map), so not included in Markdown knitted file
+
+library(ggOceanMaps)
+#packageVersion("ggOceanMaps")
+
+# Assuming your original data is stored in 'data'
+data.map <- data.c %>%
+  group_by(Dive.Name) %>%
+  dplyr::summarize(
+    lat = mean(lat),  # Or use a different method to get unique coordinates
+    lon = mean(lon),
+    feature = first(feature)  # Keep the feature or other relevant data
+  )
+
+# Transform coordinates using WGS84
+transform_coord <- function(coords) {
+  return(data.frame(
+    lon2 = coords$lon,
+    lat2 = coords$lat
+  ))
+}
+
+# Grouping and transforming data
+data_transformed <- data.map %>%
+  group_by(Dive.Name) %>%
+  dplyr::summarize(
+    lat = mean(lat),
+    lon = mean(lon),
+    feature = first(feature)
+  ) %>%
+  mutate(lon2 = lon, lat2 = lat)
+
+# Plotting the map
+# NOTE: if asked a question in console, click YES
+#basemap(limits = c(-175, -129, 51, 61), bathy.style = 'poly_grays', crs = 4326) + #bathymetry=TRUE, bathy.style = 'rcb'
+#  geom_point(data = data_transformed, aes(x = lon2, y = lat2, color = factor(feature)), size = 3) +
+#  geom_text(data = data_transformed, aes(x = lon2, y = lat2, label = Dive.Name), 
+#            hjust = 0, vjust = 1.5, size = 3, color = "black") +
+#  scale_color_viridis_d(name = "Feature") +
+#  ggspatial::annotation_scale(location = "br") + 
+#  ggspatial::annotation_north_arrow(location = "tr", which_north = "true") +
+# theme_minimal() +
+#  labs(title = "Dive Locations Map", x = "Longitude", y = "Latitude")
+
+#Feature No: 1 canyon ; 2 ridge, 3 seamount, 4 seep, 5 slope
+
+```

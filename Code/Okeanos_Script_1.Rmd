@@ -1,0 +1,661 @@
+---
+title: "Okeanos_Script_1"
+author: "Lara Beckmann"
+date: "2025-02-27"
+output:
+  html_document: 
+   toc: true
+   number_sections: true
+   toc_float: true
+  word_document: default
+  pdf_document: 
+   toc: true
+   toc_depth: 2
+   number_sections: true
+---
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+# PREPARATIONS
+
+## Set working directory 
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/Users/lara/Downloads/Okeanos Alaska Video Analysis/R Analysis/Okeanos-Video-Analysis/raw_data') 
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Clear the entire environment
+rm(list = ls())
+```
+
+## Load libraries
+
+```{r, echo=TRUE, message=FALSE}
+
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(raster) #for loading GEOtiff files
+library(RANN) #for the neighbor search function (nn)
+
+```
+
+> Script to extract Multibeam data (bathymetry and backscatter) from the tif files. For bathymetry I've got files per exhibition/region. For backscatter I have files for each dive. To make sure everything goes correctly I load everything individually.
+The resulting .csv files need to be further processed, combined as they will contain data for all annotations (just taking the "closest" value even though that doesnt make sense when giving a specific region, but thats how NJ approach works. Non NJ approach would take too long as the MB data is extremely data heavy in this high resolution
+#I need to use R terminal NOT RStudio because it will crash. In terminal it works smoothly. Since this step is separate from my other script, and only needs to be run once, its fine.
+
+## Load data
+
+> Load the annotation data - that is the master annotation file. This will be used to extract the locations/coordinates to fit to the MB data
+#The bathymetry tifs have columns for lat/lon and the bathymetry value (indicating the depth))
+
+```{r}
+
+#Load raw annotation file 
+data <- read.csv("./Annotations_all.csv", sep = ",", header=TRUE) # This is the RAW file, as downloaded from Seatube (but pre-checked) there are no MB data yet included. 
+
+#Load taxa sheet file - TAXA 
+taxa <- read.csv("./taxa_sheet_all.csv", sep = ",", header=TRUE) #all morphotypes and their metadata 
+
+```
+
+# DATA CHECK(S) 
+
+> Starting point is the downloaded Seatube data (after a first pre-check of the datafile in excel - removing any non-coral and sponge annotations e.g.) and including a check of substrate type and so on. 
+
+## Taxa check
+
+> Checking if all the morphotypes in the (raw) annotation data makes sense, if they are all in the taxa sheet and if not, why. Remove and replace missing taxa etc. Since the raw annotations are coming from Seatube directly, I need to update the taxa with my up-to-date taxa sheet. During annotations the morphotype names might have been different e.g., so this is also updated and standardised across the data. 
+
+```{r}
+
+# NOTE: This has all been done and checked already, here just as an example how the process went. 
+
+#Check if there is any mismatch between taxa file and data file:
+
+unique_morphotypes <- unique(data$Morphotype)
+length(unique_morphotypes) #check how many unique morphotypes
+unique_morphotypes_taxa <- unique(taxa$Morphotype)
+length(unique_morphotypes_taxa) #does it fit with previous? 
+
+# Find morphotype codes that are in data but not in taxa
+morphotypes_not_in_taxa <- setdiff(unique_morphotypes, unique_morphotypes_taxa)
+
+# Find morphotype codes that are in taxa but not in data
+morphotypes_not_in_data <- setdiff(unique_morphotypes_taxa, unique_morphotypes)
+
+print(morphotypes_not_in_taxa)
+print(morphotypes_not_in_data)
+
+# Define the specific morphotypes you want to remove (e.g.:)
+morphotypes_to_remove <- c("CAO12", "CAO01", "CAH01", "CAO39")
+
+# Remove annotations with those morphotypes from data
+updated_data <- data %>%
+  filter(!Morphotype %in% morphotypes_to_remove)
+
+# Change Morphotypes that changed code
+updated_data <- updated_data %>%
+  mutate(Morphotype = ifelse(Morphotype == "CAO39", "CAO37", Morphotype))
+
+# Check again if there is any mismatch between taxa file and data file:
+
+unique_morphotypes <- unique(updated_data$Morphotype)
+length(unique_morphotypes) #check how many unique morphotypes
+length(unique_morphotypes_taxa) #does it fit with previous? 
+# Find morphotype codes that are in data but not in taxa
+morphotypes_not_in_taxa <- setdiff(unique_morphotypes, unique_morphotypes_taxa)
+# Find morphotype codes that are in taxa but not in data
+morphotypes_not_in_data <- setdiff(unique_morphotypes_taxa, unique_morphotypes)
+
+print(morphotypes_not_in_taxa)
+print(morphotypes_not_in_data)
+
+#All good!
+#Continue adding the taxonomy columns/updated info
+
+```
+
+## Create expanded dataset (pre-Dataset A)
+
+> Now that the data is okay, I want to expand the dataset. Right now the column "Count" includes the number of individuals that were observed/counted for this annotation (1 frame basically). The counts are extended to rows, to represent an abundance matrix. This is Dataset A but wihtout the MB and BS data yet. Will be added later in this script. 
+
+```{r}
+
+taxonomy_columns <- c("Taxon",	"Taxon.Common.Names",	"Taxon.Path",	"Phylum",	"Class",	"Genus",	"Subgenus",	"Kingdom",	"Suborder", "Subspecies"	,"Subfamily", "Family", "Species", "Order",	"Subclass") # Add all taxonomy columns here
+
+# Remove existing taxonomy columns from data
+updated_data <- updated_data %>% dplyr::select(-one_of(taxonomy_columns))
+
+# Now, we will add new taxonomy columns based on the information in taxa
+# Join the data frames based on the morphotype code
+updated_data <- updated_data %>% left_join(taxa, by = c("Morphotype" = "Morphotype"))
+#The warning is just because I have many rows in "data" with same morphotype code (to be expected)
+
+#overwrite data frame
+data <- updated_data 
+summary(data)
+
+###Add the counts in column "Count" as rows to make one row per observation:
+
+duplicate_rows <- function(df, filename = "combined_df") {
+  duplicated_df <- data.frame()
+  # Iterate through each row of the dataframe
+  for (i in 1:nrow(df)) {
+    # Get the value from the "Value" column
+    value <- df$Count[i]
+    # Duplicate the row as many times as the value - 1
+    if (value > 1){
+      for (j in 2:value){
+        duplicated_row <- df[i, ]
+        duplicated_df <- rbind(duplicated_df, duplicated_row)
+      }}}
+  # Combine original dataframe with duplicated dataframe
+  combined_df <- rbind(df, duplicated_df)
+  assign(filename, combined_df, envir = .GlobalEnv) #save that file with name given in argument
+}
+
+#call the function - can take time!!
+duplicate_rows(data, "Expanded_dives")
+summary(Expanded_dives)
+
+## Pivot long the dataset as this is what I need for the remaining script. This means I will have one row per timestamp. The morphotypes are in columns and are indicateed with numbers (1 = 1 time occurence, 5 = occured 5x at this location)
+df <- Expanded_dives
+
+# Step 1: Count observations per Start.Date and morphotype
+count_df <- df %>% count(Start.Date, Morphotype)
+
+# Step 2: Pivot to wide format
+wide_df <- count_df %>% pivot_wider(names_from = Morphotype, values_from = n, values_fill = list(n = 0))
+
+# Step 3: Merge with original data to retain other columns (if needed)
+# Assuming 'other_info' is not unique and can be represented by one row per Start.Date
+# Step 3: Retain other columns
+other_info_df <- df %>%
+  group_by(Start.Date) %>%
+  dplyr::summarize(
+    lat = first(Latitude..deg.),
+    lon = first(Longitude..deg.),
+    oxygen = first(Oxygen.Concentration..mg.l.),
+    depth = first (Depth..m.),
+    temp = first (Temperature..C.)
+)
+
+final_df <- left_join(wide_df, other_info_df, by = "Start.Date")
+
+# This can be extracted as a csv (dataset A - expanded_data.csv - but missing the MB and BS data yet, will be added next) 
+# Also, this data file is checked again in Excel, plus dive names added, dates checked etc. 
+
+```
+
+> Here the data cleaning is done. 
+
+# MULTIBEAM
+## Bathymetry
+
+```{r}
+
+# NOTE: Just example of the process. The data file might have changed depending on the clean-up. I'm just using the final df from above here. 
+# Otherwise load the file "expanded_data.csv" and re-do the multibeam columns if you want to re-create from scratch. 
+
+# For this script (as example) use a new df, just to show the process:
+data <- final_df # (Dataset A without the MB and BS data yet) Just renaming here for this example 
+
+#For location data, extract the lat/lon columns from the data dataframe
+data_coords <- data %>% dplyr::select(lon = 167, lat = 166)
+
+```
+
+> Now that the files are good, add the data to the final data df. 
+NOTE: THIS SHOULD BE DONE IN THE TERMINAL R not RSTUDIO - IT WILL CRASH.
+
+> Multibeam data can be downloaded here (USE FIREFOX!): 
+
+* [NOAA Bathymetry Viewer](https://www.ncei.noaa.gov/maps/bathymetry/)
+* Or [NOAA Data Atlas](https://www.ncei.noaa.gov/maps/ocean-exploration-data-atlas/)
+
+> Aspect, slope, rugosity can be calculated in QGIS, see here:
+
+* [Slope & Rugosity Tutorial](https://www.youtube.com/watch?v=8-cT-eDASzQ)
+* [Aspect Tutorial](https://www.youtube.com/watch?v=B-5RQ9o9EyU)
+
+```{r, eval = FALSE}
+
+# (2) BATHYMETRY 
+# (2.1) ASPECT
+
+# (2.1.1) EX2304 50m res
+
+#Load tif file with aspect data - all steps take a while and R might crash (does not happen in RStudio). Just retry/empty memory/stop other running processes on the laptop
+aspect_raster <- stack('./bathymetry/aspect_WGS84_50m_EX2304_all.tif')
+aspect_df <- as.data.frame(aspect_raster, xy = TRUE) 
+aspect_df <- na.omit(aspect_df) #remove all NA's
+names(aspect_df)[3] <- "aspect" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(aspect_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$aspect <- aspect_df$aspect[nn$nn.idx]
+
+#From aspect, compute the eastness and northness as follows:
+#Eastness is calculated as the cosine of the aspect angle.
+#Northness is calculated as the sine of the aspect angle.
+
+# Convert aspect from degrees to radians
+data <- data %>%
+  mutate(aspect_rad = aspect * pi / 180)
+
+# Calculate eastness and northness
+data <- data %>%
+  mutate(
+    eastness = cos(aspect_rad),
+    northness = sin(aspect_rad)
+  )
+
+# write a .csv file with the aspect/eastness/northness columns added
+# DO ONLY WHEN YOU WANT TO OVERRIDE EXISTING
+#write.csv(data, "aspect_EX2304_50m_all.csv", row.names = FALSE) 
+
+# (2.1.2) EX2306 50m res southern seamount
+# Only 50m res available for this region. The remaining dives of 2306 is 100m res
+#Same code as above just using the respective tif file 
+
+aspect_raster <- stack('./bathymetry/aspect_WGS84_50m_EX2306_seamountssouth.tif')
+aspect_df <- as.data.frame(aspect_raster, xy = TRUE) %% na.omit()  
+names(aspect_df)[3] <- "aspect" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(aspect_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$aspect <- aspect_df$aspect[nn$nn.idx]
+
+#From aspect, compute the eastness and northness as follows:
+#Eastness is calculated as the cosine of the aspect angle.
+#Northness is calculated as the sine of the aspect angle.
+
+# Convert aspect from degrees to radians
+data <- data %>%
+  mutate(aspect_rad = aspect * pi / 180)
+
+# Calculate eastness and northness
+data <- data %>%
+  mutate(
+    eastness = cos(aspect_rad),
+    northness = sin(aspect_rad)
+  )
+
+#write.csv(data, "aspect_EX2306_50m_seamountssouth.csv", row.names = FALSE) 
+
+# (2.1.3) EX2306 100m res all regions (except Dive 8 is missing!)
+
+aspect_raster <- stack('./bathymetry/aspect_2306_100m_all.tif')
+aspect_df <- as.data.frame(aspect_raster, xy = TRUE) %% na.omit()  
+names(aspect_df)[3] <- "aspect" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(aspect_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$aspect <- aspect_df$aspect[nn$nn.idx]
+
+#From aspect, compute the eastness and northness as follows:
+#Eastness is calculated as the cosine of the aspect angle.
+#Northness is calculated as the sine of the aspect angle.
+
+# Convert aspect from degrees to radians
+data <- data %>%
+  mutate(aspect_rad = aspect * pi / 180)
+
+# Calculate eastness and northness
+data <- data %>%
+  mutate(
+    eastness = cos(aspect_rad),
+    northness = sin(aspect_rad)
+  )
+
+#write.csv(data, "aspect_EX2306_100m_all.csv", row.names = FALSE) 
+
+# (2.2) SLOPE
+
+# (2.2.1) EX2304 50m res
+#The code is similar to above (aspect) but it doesnt need to transformation at the end
+
+slope_raster <- stack('./bathymetry/slope_WGS84_50m_EX2304_all.tif')
+slope_df <- as.data.frame(slope_raster, xy = TRUE)
+slope_df <- na.omit(slope_df)
+names(slope_df)[3] <- "slope" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(slope_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$slope <- slope_df$slope[nn$nn.idx]
+
+#write.csv(data, "slope_EX2304_50m_all.csv", row.names = FALSE)
+
+# (2.2.2) EX2306 50m res southern seamounts
+
+slope_raster <- stack('./bathymetry/slope_WGS84_50m_EX2306_seamountssouth.tif')
+slope_df <- as.data.frame(slope_raster, xy = TRUE)
+slope_df <- na.omit(slope_df)
+names(slope_df)[3] <- "slope" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(slope_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$slope <- slope_df$slope[nn$nn.idx]
+
+#write.csv(data, "slope_EX2306_50m_seamountssouth.csv", row.names = FALSE)
+
+# (2.2.3) EX2306 100m res all regions
+
+#Load tif file with slope data - all steps take a while 
+slope_raster <- stack('./bathymetry/slope_2306_100m_all.tif')
+slope_df <- as.data.frame(slope_raster, xy = TRUE)
+slope_df <- na.omit(slope_df)
+names(slope_df)[3] <- "slope" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(slope_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$slope <- slope_df$slope[nn$nn.idx]
+
+#write.csv(data, "slope_EX2306_100m_all.csv", row.names = FALSE)
+
+# (2.3) RUGOSITY
+
+# (2.3.1) EX2304 50m res
+#The code is similar to above 
+
+rugosity_raster <- stack('./bathymetry/roughness_WGS84_50m_EX2304_all.tif')
+rugosity_df <- as.data.frame(rugosity_raster, xy = TRUE)
+rugosity_df <- na.omit(rugosity_df)
+names(rugosity_df)[3] <- "rugosity" 
+nn <- nn2(rugosity_df %>% dplyr::select(x, y), data_coords, k = 1)
+data$rugosity <- rugosity_df$rugosity[nn$nn.idx]
+
+#write.csv(data, "rugosity_EX2304_50m_all.csv", row.names = FALSE)
+
+# (2.3.2) EX2306 50m res southern seamounts
+
+rugosity_raster <- stack('./bathymetry/roughness_WGS84_50m_EX2306_seamountssouth.tif')
+rugosity_df <- as.data.frame(rugosity_raster, xy = TRUE)
+rugosity_df <- na.omit(rugosity_df)
+names(rugosity_df)[3] <- "rugosity" 
+nn <- nn2(rugosity_df %>% dplyr::select(x, y), data_coords, k = 1)
+data$rugosity <- rugosity_df$rugosity[nn$nn.idx]
+
+#write.csv(data, "rugosity_EX2306_50m_seamountssouth.csv", row.names = FALSE)
+
+# (2.3.3) EX2306 100m res all regions
+
+rugosity_raster <- stack('./bathymetry/roughness_2306_100m_all.tif')
+rugosity_df <- as.data.frame(rugosity_raster, xy = TRUE)
+rugosity_df <- na.omit(rugosity_df)
+names(rugosity_df)[3] <- "rugosity" 
+nn <- nn2(rugosity_df %>% dplyr::select(x, y), data_coords, k = 1)
+data$rugosity <- rugosity_df$rugosity[nn$nn.idx]
+
+#write.csv(data, "rugosity_EX2306_100m_all.csv", row.names = FALSE)
+
+
+# (2.3.4) EX2306 100m Dive 8 NCEI data for Aspect - Slope - Rugosity
+## As Dive 8 was not done during EX2306, I am using NCEI data available (not sure about the source/expedition, but it says 100m res)
+
+#ASPECT
+
+aspect_raster <- stack('./bathymetry/aspect_EX2306_WGS84_100m_Dive8.tif')
+aspect_df <- as.data.frame(aspect_raster, xy = TRUE) 
+aspect_df <- na.omit(aspect_df) #remove all NA's
+names(aspect_df)[3] <- "aspect" 
+# Perform the nearest neighbor search using RANN
+nn <- nn2(aspect_df %>% dplyr::select(x, y), data_coords, k = 1)
+# Add the aspect values to the original data dataframe
+data$aspect <- aspect_df$aspect[nn$nn.idx]
+
+#From aspect, compute the eastness and northness as follows:
+#Eastness is calculated as the cosine of the aspect angle.
+#Northness is calculated as the sine of the aspect angle.
+
+# Convert aspect from degrees to radians
+data <- data %>%
+  mutate(aspect_rad = aspect * pi / 180)
+
+# Calculate eastness and northness
+data <- data %>%
+  mutate(
+    eastness = cos(aspect_rad),
+    northness = sin(aspect_rad)
+  )
+
+#write.csv(data, "aspect_EX2306_WGS84_100m_Dive8.csv", row.names = FALSE) # write a .csv file with the aspect/eastness/northness columns added
+
+#RUGOSITY
+
+rugosity_raster <- stack('./bathymetry/roughness_EX2306_WGS84_100m_Dive8.tif')
+rugosity_df <- as.data.frame(rugosity_raster, xy = TRUE)
+rugosity_df <- na.omit(rugosity_df)
+names(rugosity_df)[3] <- "rugosity" 
+nn <- nn2(rugosity_df %>% dplyr::select(x, y), data_coords, k = 1)
+data$rugosity <- rugosity_df$rugosity[nn$nn.idx]
+
+#write.csv(data, "rugosity_EX2306_100m_Dive8.csv", row.names = FALSE)
+
+#SLOPE
+
+slope_raster <- stack('./bathymetry/slope_EX2306_WGS84_100m_Dive8.tif')
+slope_df <- as.data.frame(slope_raster, xy = TRUE)
+slope_df <- na.omit(slope_df)
+names(slope_df)[3] <- "slope" 
+nn <- nn2(slope_df %>% dplyr::select(x, y), data_coords, k = 1)
+data$slope <- slope_df$slope[nn$nn.idx]
+
+#write.csv(data, "slope_EX2306_100m_Dive8.csv", row.names = FALSE)
+
+```
+
+# Backscatter
+
+```{r, eval = FALSE}
+
+# (3) BACKSCATTER
+# (3.1) EX2304
+
+#Dive 2 - 16 July 2023
+
+bs_raster <- stack('./backscatter/EX2304_BS_20230716_WGS84_15m.tiff')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+# Add the values to the original data dataframe
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2304_15m_Dive2.csv", row.names = FALSE)
+
+#Dive 5 2304  
+
+bs_raster <- stack('./backscatter/EX2304_BS_20230719_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2304_BS_20230719_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2304_BS_20230719_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2304_10m_Dive5.csv", row.names = FALSE)
+
+#Dive 7 2304 
+
+bs_raster <- stack('./backscatter/EX2304_BS_20230723_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2304_BS_20230723_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2304_BS_20230723_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2304_10m_Dive7.csv", row.names = FALSE)
+
+#Dive 8 2304 
+
+bs_raster <- stack('./backscatter/EX2304_BS_20230725_WGS84_20m.tiff')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2304_BS_20230725_WGS84_20m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2304_BS_20230725_WGS84_20m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2304_20m_Dive8.csv", row.names = FALSE)
+
+# (3.2) EX2306
+
+#Dive 3 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230826_WGS84_15m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230826_WGS84_15m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230826_WGS84_15m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_15m_Dive3.csv", row.names = FALSE)
+
+#Dive 4 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230827_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230827_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230827_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_10m_Dive4.csv", row.names = FALSE)
+
+#Dive 4 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230828_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230828_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230828_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_10m_Dive5.csv", row.names = FALSE)
+
+#Dive 6 2306  
+bs_raster <- stack('./backscatter/EX2306_BS_20230829_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230829_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230829_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_10m_Dive6.csv", row.names = FALSE)
+
+#Dive 7 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230830_WGS84_15m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230830_WGS84_15m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230830_WGS84_15m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_15m_Dive7.csv", row.names = FALSE)
+
+#Dive 8 08 N 2306  
+#there are 2 files for Dive 8 need to check for overlap in those (check the lat/lons)
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230831_WGS84_10m_08N.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230831_WGS84_10m_08N_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230831_WGS84_10m_08N_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_10m_Dive8_08N.csv", row.names = FALSE)
+
+#Dive 8 07N 2306 
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230831_WGS84_20m_07N.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230831_WGS84_20m_07N_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230831_WGS84_20m_07N_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_20m_Dive8_07N.csv", row.names = FALSE)
+
+#Dive 12 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230905_WGS84_15m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230905_WGS84_15m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230905_WGS84_15m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_20m_Dive12.csv", row.names = FALSE)
+
+#Dive 15 2306  
+bs_raster <- stack('./backscatter/EX2306_BS_20230910_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230910_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230910_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_10m_Dive15.csv", row.names = FALSE)
+
+#Dive 18 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230912_WGS84_10m.tif')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230912_WGS84_10m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230912_WGS84_10m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_10m_Dive18.csv", row.names = FALSE)
+
+#Dive 14 2306  
+
+bs_raster <- stack('./backscatter/EX2306_BS_20230907_WGS84_05m.tiff')
+bs_df <- as.data.frame(bs_raster, xy = TRUE)
+bs_df <- na.omit(bs_df)
+bs_df <- bs_df %% rename("backscatter_2" = "EX2306_BS_20230907_WGS84_05m_2")
+bs_df <- bs_df %% rename("backscatter_1" = "EX2306_BS_20230907_WGS84_05m_1")
+nn <- nn2(bs_df %% select(x, y), data_coords, k = 1)
+data$backscatter_1 <- bs_df$backscatter_1[nn$nn.idx]
+data$backscatter_2 <- bs_df$backscatter_2[nn$nn.idx]
+
+#write.csv(data, "bs_EX2306_05m_Dive14.csv", row.names = FALSE)
+
+```
+
+> Once all those files are created, the data can be individually copy pasted from the csv files to the expanded_data file. Just add the respective columns, select the dive and copy/past the data from the respective BS or MB file. This way the data can also be checked manually - do the values make sense etc. I prefered that over the R solution. 
+Now DATASET A is complete and can be further used as the expanded_data in Script 2. 
+
+
+
