@@ -1,6 +1,7 @@
 # Okeanos_Alaska
 **Okeanos Alaska: Deep-Sea Coral and Sponge Communities**
 
+[last updated 18 Feb 2026]
 This repository contains the data, R scripts, and reproducible workflow used to analyze biological annotation data from NOAA Okeanos Explorer dives EX2304 and EX2306, conducted across the Gulf of Alaska and Aleutian Islands. The analyses focus on community composition, diversity, and environmental drivers of deep-sea coral and sponge assemblages.
 
 **Zenodo Archive**
