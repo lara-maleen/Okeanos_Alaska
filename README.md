@@ -15,7 +15,7 @@ A preprint describing the associated analyses is available at SSRN: https://pape
 
 *Raw Data/*
 
-Contains all necessary input files used in the analysis, including biological annotations from ROV video surveys and derived environmental variables (depth, temperature, salinity, oxygen, substrate type, and terrain metrics).
+Contains all necessary input files used in the analysis, including biological annotations from ROV video surveys and derived environmental variables (depth, temperature, salinity, oxygen, substrate type, and terrain metrics). The full CTD profiles can be downloaded from NOAA and transformed to .cnv (or contact me for the full file, they are too large to upload here). 
 
 *Code/*
 
