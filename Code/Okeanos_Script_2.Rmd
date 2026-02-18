@@ -1,17 +1,19 @@
 ---
 title: "Okeanos script"
 author: "Lara Beckmann"
-date: "2025-02-24"
+date: "2026-02-18"
+always_allow_html: true
 output:
-  html_document: 
-   toc: true
-   number_sections: true
-   toc_float: true
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float: true
   word_document: default
-  pdf_document: 
-   toc: true
-   toc_depth: 2
-   number_sections: true
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 2
+    number_sections: true
 ---
 
 ## R Markdown
@@ -66,6 +68,16 @@ library(kableExtra)
 library(splines)  
 library(ggpubr)
 library(ggrepel)
+library(iNEXT)
+library(oce)
+library(betapart)
+library(patchwork)
+library(readxl)
+library(robis)
+library(lubridate) 
+library(ggbreak)
+library(plotly)
+library(raster)
 #remotes::install_github("MikkoVihtakari/ggOceanMaps")
 library(ggOceanMaps)
 
@@ -89,7 +101,7 @@ garden_length_df <- read.csv("./forest_data.csv", sep = ",", header=TRUE)
 
 ```
 
-> Explanation: Dive_Name is the code for each EX dive. Here the correct names of each location. In some plots only the numbers will be shown, so here is the reference list:
+> Explanation: Dive.Name is the code for each EX dive. Here the correct names of each location. In some plots only the numbers will be shown, so here is the reference list:
 
 >
 1) 2304_02 = Big Bend
@@ -152,7 +164,137 @@ print(num_single_dive_morphotypes)
 # Can print the morphotypes that occurred in a single dive only: 
 #knitr::kable(morphotypes_single_dive, caption = "Morphotypes that occures in a single dive location only")
 
+
+# Compute min and max latitude and longitude per Dive.Name
+dive_extents <- data.a %>%
+  group_by(Dive.Name) %>%
+  summarize(
+    min_lat = min(Latitude..deg., na.rm = TRUE),
+    max_lat = max(Latitude..deg., na.rm = TRUE),
+    min_lon = min(Longitude..deg., na.rm = TRUE),
+    max_lon = max(Longitude..deg., na.rm = TRUE)
+  )
+
+dive_extents
+
+
 ``` 
+
+```{r}
+
+#Species Accumulation Curves SACs to check for sampling effort
+
+#For all dives:
+# Create site × morphotype matrix
+SPE2_matrix <- xtabs(~ Dive.Name + Morphotype, data = data.a)
+
+# Plot species accumulation curves for each dive
+specaccum_obj <- specaccum(SPE2_matrix)
+plot(specaccum_obj, xlab = "Number of samples (rows)", ylab = "Species richness",
+     main = "Species accumulation curves per dive")
+
+# Rarefied richness at smallest sample size
+min_samples <- min(rowSums(SPE2_matrix))
+rare_richness <- rarefy(SPE2_matrix, sample = min_samples)
+rare_richness
+
+# Rarefied richness 
+rare_richness_df <- data.frame(
+  Dive = names(rare_richness),
+  RarefiedRichness = rare_richness
+)
+
+ggplot(rare_richness_df, aes(x = Dive, y = RarefiedRichness)) +
+  geom_col(fill = "skyblue") +
+  theme_minimal() +
+  xlab("Dive site") +
+  ylab("Rarefied morphotype richness") +
+  coord_flip()  # if you want dives on the y-axis
+
+#For each dive separately (This is what we want)
+
+# Create site × morphotype matrix
+SPE2_matrix <- xtabs(~ Dive.Name + Morphotype, data = data.a)
+
+# Run species accumulation for each dive separately
+specaccum_list <- lapply(rownames(SPE2_matrix), function(dive) {
+  mat <- SPE2_matrix[dive, , drop = FALSE]  # subset one dive
+  # Create a fake 'sample' structure if needed (here each annotation = 1)
+  specaccum(t(mat))
+})
+
+# your data: dives × morphotypes (abundances)
+SPE2_matrix <- xtabs(~ Dive.Name + Morphotype, data = data.a)
+
+# Convert to list format (one vector per dive)
+abund_list <- apply(SPE2_matrix, 1, function(x) x[x > 0])
+
+# Run iNEXT for q = 0 (richness) for each dive
+iNext_out <- iNEXT(abund_list, q = 0, datatype = "abundance")
+
+# Plot (one curve per dive)
+ggiNEXT(iNext_out, type = 1, facet.var = "Assemblage") +
+  labs(x = "Number of samples (annotations)", y = "Estimated morphotype richness") +
+  theme_minimal()
+
+
+# Convert to list format (each element = abundances per dive)
+abund_list <- apply(SPE2_matrix, 1, function(x) x[x > 0])
+
+# Loop through dives
+for (d in names(abund_list)) {
+  cat("Processing", d, "...\n")
+  
+  # Run iNEXT for that dive
+  out_d <- iNEXT(abund_list[[d]], q = 0, datatype = "abundance")
+  
+  # Plot (note: remove color.var!)
+  p <- ggiNEXT(out_d, type = 1) +
+    ggtitle(paste("Species Accumulation Curve -", d)) +
+    theme_minimal()
+  
+  print(p)
+}
+
+for (d in names(abund_list)) {
+  cat("Processing", d, "...\n")
+  out_d <- iNEXT(abund_list[[d]], q = 0, datatype = "abundance")
+  
+  suppressWarnings({
+    p <- ggiNEXT(out_d, type = 1) +
+      ggtitle(paste("Species Accumulation Curve -", d)) +
+      theme_minimal()
+    print(p)
+  })
+}
+
+
+
+# Convert to list format (each element = abundances per dive)
+abund_list <- apply(SPE2_matrix, 1, function(x) x[x > 0])
+
+# Run iNEXT once for all dives together
+out_all <- iNEXT(abund_list, q = 0, datatype = "abundance")
+
+# Plot all dives in one combined plot
+p_all <- ggiNEXT(out_all, type = 1, color.var = "Assemblage") +
+  geom_line(size = 0.3) +                      
+  theme_minimal() +
+  labs(
+    title = "Species Accumulation Curves per Dive",
+    x = "Number of individuals",
+    y = "Species richness (q = 0)",
+    color = "Dive"
+  ) +
+  theme(
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+
+print(p_all)
+
+```
+
 
 > Now I want to plot density (number of counts) by depth and divided for each phylum. Since some depths have been visited several times, I am scaling the counts by the duration of each dive, which results in an effort-corrected count. This way there is no bias on the density, e.g. if more time spent in 700 m because there were 2 dives. The plot also gives an overview of the highest abundances, and how the abundances change over depth. 
 
@@ -229,8 +371,35 @@ anova(glm_model, test = "Chisq") # no
 # And if we use the non-corrected data? 
 glm_model <- glm(Count ~ Depth..m., data = df_summary, family = poisson)
 summary(glm_model)  # Poisson - this is significant, but might be biased because of the sampling effort
+
      
 ```
+
+
+``` {r}
+
+effort_summary <- df_corrected %>%
+  group_by(Dive.Name, Phylum) %>%
+  summarise(
+    mean_effort_corrected = mean(Effort_Corrected_Count, na.rm = TRUE),
+    max_effort_corrected = max(Effort_Corrected_Count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Dive.Name, Phylum)
+
+effort_summary
+
+peak_density <- df_corrected %>%
+  group_by(Dive.Name, Phylum) %>%
+  slice_max(Effort_Corrected_Count, n = 1, with_ties = FALSE) %>%  # get depth with max density
+  ungroup() %>%
+  dplyr::select(Dive.Name, Phylum, Depth..m., Effort_Corrected_Count)
+
+peak_density
+
+```
+
+
 
 > In geom_density(), the density represents a smoothed estimate of the distribution of observations across depth.
 It's similar to a histogram but smoothed into a continuous curve. 
@@ -309,6 +478,86 @@ min(within_omz$Depth..m.)
 max(within_omz$Depth..m.) 
 
 
+#Also check medium by all dives:
+substrate_percent <- data.a %>%
+  group_by(Dive.Name, Sediment_type) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(Dive.Name) %>%
+ mutate(percent = 100 * count / sum(count))
+
+substrate_percent
+
+#Terrain variables
+
+
+terrain_vars <- data.b %>%
+  dplyr::select(
+    Dive.Name,
+    depth,
+    slope,
+    rugosity,
+    bs,
+    aspect,
+    eastness,
+    northness
+  )
+
+terrain_summary_overall <- terrain_vars %>%
+  dplyr::select(-Dive.Name) %>%
+  summarise(across(
+    everything(),
+    list(
+      mean = ~mean(.x, na.rm = TRUE),
+      sd   = ~sd(.x, na.rm = TRUE),
+      median = ~median(.x, na.rm = TRUE),
+      IQR = ~IQR(.x, na.rm = TRUE),
+      min = ~min(.x, na.rm = TRUE),
+      max = ~max(.x, na.rm = TRUE),
+      CV = ~sd(.x, na.rm = TRUE) / mean(.x, na.rm = TRUE)
+    ),
+    .names = "{.col}_{.fn}"
+  ))
+
+terrain_summary_overall
+
+terrain_summary_dive <- terrain_vars %>%
+  group_by(Dive.Name) %>%
+  summarise(
+    n_obs = n(),
+
+    depth_mean = mean(depth, na.rm = TRUE),
+    depth_sd   = sd(depth, na.rm = TRUE),
+
+    slope_mean = mean(slope, na.rm = TRUE),
+    slope_sd   = sd(slope, na.rm = TRUE),
+
+    rugosity_mean = mean(rugosity, na.rm = TRUE),
+    rugosity_sd   = sd(rugosity, na.rm = TRUE),
+
+    bs_mean = mean(bs, na.rm = TRUE),
+    bs_sd   = sd(bs, na.rm = TRUE),
+
+    eastness_mean = mean(eastness, na.rm = TRUE),
+    northness_mean = mean(northness, na.rm = TRUE),
+
+    eastness_sd = sd(eastness, na.rm = TRUE),
+    northness_sd = sd(northness, na.rm = TRUE)
+  )
+
+terrain_summary_dive
+
+terrain_pca_data <- terrain_vars %>%
+  dplyr::select(
+    depth,
+    slope,
+    rugosity,
+    bs,
+    eastness,
+    northness
+  ) %>%
+  na.omit()
+
+
 ```
 
 ## Correlations - environmental variables
@@ -339,43 +588,304 @@ corrplot(env.pearson, method = "circle", type = "upper", tl.col = "black", tl.ce
 
 ```{r}
 
-# Create the plot 1) TEMP vs Oxgyen
-ggplot(data.a, aes(y = Temperature..C., x = Oxygen.Concentration..mg.l., color = Depth..m.)) +
-  geom_point(size = 1) +    # Scatter plot with color representing depth
-  #scale_color_gradient(name = "Depth (m)", low = "blue", high = "red") +  # Color gradient
-  scale_color_viridis(option = "viridis", direction = -1) +  # Color scale with cividis for colorblind-friendly option
-  #scale_y_reverse() +  # Reverse y-axis to put shallow depth on top
-  xlab("Oxygen (mg/L)") +                         # X-axis label
-  ylab("Temperature (°C)") +                      # Left y-axis label
+# Plot 1: Temperature vs Oxygen
+ggplot(data.a, aes(x = Oxygen.Concentration..mg.l., y = Temperature..C., color = Depth..m.)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1) +
+  xlab("Oxygen (mg/L)") +
+  ylab("Temperature (°C)") +
   theme_linedraw() +
   theme(panel.grid = element_blank(),
         legend.title = element_text(size = 10),
         legend.text = element_text(size = 10),
-        axis.title.x = element_text (size = 14),
+        axis.title.x = element_text(size = 14),
         axis.title.y = element_text(size = 14),
         legend.background = element_blank(),
-        legend.box.background= element_rect(colour="black"),
+        legend.box.background = element_rect(colour = "black"),
         legend.position = "right")
 
-# Create the plot 2) Salinity vs Temperature
-ggplot(data.a, aes(y = Temperature..C., x = Salinity..psu., color = Depth..m.)) +
-  geom_point(size = 1) +    # Scatter plot with color representing depth
-  #scale_color_gradient(name = "Depth (m)", low = "blue", high = "red") +  # Color gradient
-  scale_color_viridis(option = "viridis", direction = -1) +  # Color scale with cividis for colorblind-friendly option
-  #scale_y_reverse() +  # Reverse y-axis to put shallow depth on top
-  xlab("Salinity (psu)") +                         # X-axis label
-  ylab("Temperature (°C)") +                      # Left y-axis label
+# Plot 2: Salinity vs Temperature
+ggplot(data.a, aes(x = Salinity..psu., y = Temperature..C., color = Depth..m.)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1) +
+  xlab("Salinity (psu)") +
+  ylab("Temperature (°C)") +
   theme_linedraw() +
   theme(panel.grid = element_blank(),
         legend.title = element_text(size = 10),
         legend.text = element_text(size = 10),
-        axis.title.x = element_text (size = 14),
+        axis.title.x = element_text(size = 14),
         axis.title.y = element_text(size = 14),
         legend.background = element_blank(),
-        legend.box.background= element_rect(colour="black"),
+        legend.box.background = element_rect(colour = "black"),
         legend.position = "right")
+
+# Plot 3: Oxygen vs Depth
+ggplot(data.a, aes(x = Oxygen.Concentration..mg.l., y = Depth..m., color = Temperature..C.)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1) +
+  scale_y_reverse() +  # depth increases downward
+  xlab("Oxygen (mg/L)") +
+  ylab("Depth (m)") +
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black"),
+        legend.position = "right") +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +  # OMZ threshold
+  annotate("text", x = 1.2, y = min(data.a$Depth..m., na.rm = TRUE), 
+           label = "OMZ < 1 mg/L", color = "red", angle = 90, vjust = -0.5)
+
+
+# Color with Dive.Names instead
+
+ggplot(data.a, aes(x = Oxygen.Concentration..mg.l., y = Temperature..C., color = Dive.Name)) +
+  geom_point(size = 1) +
+  xlab("Oxygen (mg/L)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black"),
+        legend.position = "right")
+
+# Plot 2: Salinity vs Temperature
+ggplot(data.a, aes(x = Salinity..psu., y = Temperature..C., color = Dive.Name)) +
+  geom_point(size = 1) +
+  xlab("Salinity (psu)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black"),
+        legend.position = "right")
+
+# Plot 3: Oxygen vs Depth
+ggplot(data.a, aes(x = Oxygen.Concentration..mg.l., y = Depth..m., color = Dive.Name)) +
+  geom_point(size = 1) +
+  scale_y_reverse() +  # depth increases downward
+  xlab("Oxygen (mg/L)") +
+  ylab("Depth (m)") +
+  theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black"),
+        legend.position = "right") +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +  # OMZ threshold
+  annotate("text", x = 1.2, y = min(data.a$Depth..m., na.rm = TRUE), 
+           label = "OMZ < 1 mg/L", color = "red", angle = 90, vjust = -0.5)
+
+
 
 ```
+### CTD column profile
+> Extract CTD data for the deepest dive (Dive 05) 
+
+```{r}
+
+#Load CTD data for complete surface to bottom track of ROV to plot the profile (down to 4000m in Dive 5). I had the raw files for this (.hex and .xmlcon) which needed to be converted to .cnv - a specific software is needed for this. Once this is done, proceed with plotting. The raw hex and xmlcon files can be downloaded from NOAA. 
+
+ctd <- read.ctd('/Users/lara/Downloads/EX2306_DIVE15_20230910_ROVCTD.cnv')
+#or EX2306_DIVE07_20230830_ROVCTD.cnv - just change the file name above 
+#or EX2306_DIVE15_20230910_ROVCTD.cnv
+#or EX2304_DIVE07_20230723_ROVCTD.cnv
+
+summary(ctd)
+#plot(ctd) #takes a long time to run, so skip
+
+# Convert to a dataframe
+ctd.data <- as.data.frame(ctd@data)
+
+# Add depth (pressure in dbar ≈ depth in m, roughly valid for deep dives)
+ctd.data <- ctd.data %>%
+  mutate(depth = pressure)
+
+# Check which variable names exist
+names(ctd.data)
+
+#Need to convert Oxygen to mg/L as in my other plots (error <1%). Oxygen is in µmol kg⁻¹. OxygenRaw is ml/L 
+ctd.data$oxygen_mgL <- ctd.data$oxygen / 31.25
+
+max_depth <- max(ctd.data$depth, na.rm = TRUE)
+
+ggplot(ctd.data, aes(x = oxygen_mgL, y = temperature, color = depth)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1) +
+  xlab("Oxygen (mg/L)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour="black"),
+    legend.position = "right"
+  )
+
+#Can also plot the ml/L to compare to Henry et al 
+ggplot(ctd.data, aes(x = oxygenRaw, y = temperature, color = depth)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1) +
+  xlab("Oxygen (ml/L)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour="black"),
+    legend.position = "right"
+  )
+
+ggplot(ctd.data, aes(x = salinity, y = temperature, color = depth)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1) +
+  xlab("Salinity (PSU)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour="black"),
+    legend.position = "right"
+  )
+
+# Convert to long format for faceted plotting
+plot_data <- ctd.data %>%
+  dplyr::select(pressure, temperature, salinity, oxygen_mgL) %>%
+  pivot_longer(cols = c(temperature, salinity, oxygen_mgL),
+               names_to = "variable",
+               values_to = "value")
+
+# Plot raw points vs depth, faceted by variable
+ggplot(plot_data, aes(x = value, y = pressure)) +
+  geom_point(size = 0.5, alpha = 0.6) +  # raw measurements
+  scale_y_reverse() +  # shallow on top
+  facet_wrap(~variable, nrow = 1, scales = "free_x") +  # one row, separate x-axis for each
+  labs(y = "Pressure (db)", x = NULL) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 12),
+        axis.title.y = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# Pressure Binning 
+plot_data_binned <- plot_data %>%
+  # Create 10db pressure bins
+  mutate(pressure_bin = cut(pressure, breaks = seq(0, max(pressure), by = 10))) %>%
+  group_by(variable, pressure_bin) %>%
+  summarise(
+    pressure = mean(pressure),  # Use mean pressure in each bin
+    value = mean(value),        # Use mean value in each bin
+    .groups = 'drop'
+  ) %>%
+  arrange(pressure) %>%
+  dplyr::select(-pressure_bin)
+
+# Check the reduction
+cat("Original data points:", nrow(plot_data), "\n")
+cat("Binned data points:", nrow(plot_data_binned), "\n")
+
+# Create the plots
+plot_temp <- ggplot(plot_data_binned %>% filter(variable == "temperature"), 
+                    aes(x = value, y = pressure)) +
+  geom_path(linewidth = 0.6, color = "#E41A1C") +
+  scale_y_reverse() +
+  labs(x = "Temperature (°C)", y = "Pressure (db)", title = "Temperature") +
+  theme_bw(base_size = 10) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+plot_sal <- ggplot(plot_data_binned %>% filter(variable == "salinity"), 
+                   aes(x = value, y = pressure)) +
+  geom_path(linewidth = 0.6, color = "#377EB8") +
+  scale_y_reverse() +
+  labs(x = "Salinity (PSU)", y = NULL, title = "Salinity") +
+  theme_bw(base_size = 10) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+plot_oxygen <- ggplot(plot_data_binned %>% filter(variable == "oxygen_mgL"), 
+                      aes(x = value, y = pressure)) +
+  geom_path(linewidth = 0.6, color = "#4DAF4A") +
+  scale_y_reverse() +
+  labs(x = expression("Oxygen (mg L"^{-1}*")"), y = NULL, title = "Oxygen") +
+  theme_bw(base_size = 10) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Combine plots side by side
+combined_plot <- plot_temp + plot_sal + plot_oxygen + 
+  plot_layout(nrow = 1)
+
+# Display the plot in R
+print(combined_plot)
+
+#Plots for MS:
+
+# Get shared depth range from the full dataset
+depth_limits <- range(ctd.data$depth, na.rm = TRUE)
+
+ggplot(ctd.data, aes(x = salinity, y = temperature, color = depth)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1, limits = depth_limits) +
+  xlab("Salinity (PSU)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour = "black"),
+    legend.position = "right"
+  )
+
+
+ggplot(ctd.data, aes(x = oxygen_mgL, y = temperature, color = depth)) +
+  geom_point(size = 1) +
+  scale_color_viridis(option = "viridis", direction = -1, limits = depth_limits) +
+  xlab("Oxygen (mg/L)") +
+  ylab("Temperature (°C)") +
+  theme_linedraw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour="black"),
+    legend.position = "right"
+  )
+
+
+```
+
 
 # DATA MANIPULATION
 
@@ -601,6 +1111,137 @@ ggplot(species_long, aes(x = reorder(Species, Depth), y = Depth, color = Categor
   theme_minimal()
 
 ```
+> Morphotype plot FULL 
+
+``` {r}
+
+
+# 1. Long format
+data_long <- data.b %>%
+  pivot_longer(
+    cols = 3:165,
+    names_to = "Morphotype",
+    values_to = "Abundance"
+  ) %>%
+  mutate(
+    Presence = Abundance > 0,
+    Group = case_when(
+      str_starts(Morphotype, "C") ~ "Cnidarian",
+      str_starts(Morphotype, "P") ~ "Sponge",
+      TRUE ~ "Other"
+    ),
+    Depth_mid = (
+      as.numeric(sub("-.*", "", depth_bin)) +
+      as.numeric(sub(".*-", "", depth_bin))
+    ) / 2
+  )
+
+# 2. Keep presence only
+data_presence <- data_long %>%
+  filter(Presence)
+
+# 3. Remove singletons
+data_presence <- data_presence %>%
+  group_by(Morphotype) %>%
+  filter(sum(Abundance) > 1) %>%
+  ungroup()
+
+# 4. Order taxa by mean depth of occurrence
+taxon_depth_order <- data_presence %>%
+  group_by(Group, Morphotype) %>%
+  summarize(
+    MeanDepth = mean(Depth_mid, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Group, MeanDepth) %>%
+  pull(Morphotype)
+
+data_presence$Morphotype<- factor(
+  data_presence$Morphotype,
+  levels = taxon_depth_order
+)
+
+# 5. Order dives by depth
+dive_order <- data_presence %>%
+  group_by(Dive.Name) %>%
+  summarize(MeanDepth = mean(Depth_mid), .groups = "drop") %>%
+  arrange(MeanDepth) %>%
+  pull(Dive.Name)
+
+data_presence$Dive.Name <- factor(
+  data_presence$Dive.Name,
+  levels = dive_order
+)
+
+
+data_presence <- data_presence %>%
+  mutate(
+    AbundClass = cut(
+      Abundance,
+       breaks = c(0, 25, 250, Inf),
+      labels = c("1–25", "26–250", "251+"),
+      right = TRUE
+    )
+  )
+
+
+data_plot <- data_presence %>%
+  group_by(Dive.Name, Morphotype, Group) %>%
+  summarise(
+    Abundance = sum(Abundance),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    AbundClass = cut(
+      Abundance,
+     breaks = c(0, 25, 250, Inf),
+      labels = c("1–25", "26–250", "251+"),
+    )
+  )
+
+
+ggplot(data_plot, aes(x = Dive.Name, y = Morphotype)) +
+  geom_point(
+    aes(size = AbundClass, alpha = AbundClass, color = Group)
+  ) +
+  facet_wrap(~Group, scales = "free_y", nrow = 1) +
+  scale_size_manual(
+    values = c(
+      "1–25"     = 2,
+      "26–250"   = 3,
+      "251+"  = 4
+    ),
+    name = "Abundance"
+  ) +
+  scale_alpha_manual(
+    values = c(
+      "1–25"     = 0.3,
+      "26–250"   = 0.6,
+      "251+"  = 1
+    ),
+    guide = "none"
+  ) +
+  scale_color_manual(
+    values = c("Cnidarian" = "steelblue",
+               "Sponge"   = "darkorange")
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_blank(),
+    strip.text = element_text(face = "bold"),
+    panel.spacing = unit(1, "lines")
+  )
+
+
+data_plot %>%
+  distinct(Morphotype, Group) %>%
+  count(Group)
+#since I exclude singletons, only occur once
+
+
+```
+
 
 # GARDEN ANALYSIS
 
@@ -751,6 +1392,7 @@ list_of_dfs <- lapply(seq_along(file_paths), function(i) {
   return(df)
 })
 
+
 # Function to calculate average density per morphotype
 summarize_density_df <- function(df) {
   df %>%
@@ -762,9 +1404,9 @@ summarize_density_df <- function(df) {
 # Apply function to all garden data
 gardens_df <- bind_rows(lapply(list_of_dfs, summarize_density_df), .id = "df_id")
 
-# Join with taxa data (assumed to be available)
+# Join with taxa data
 gardens_df <- gardens_df %>%
-  left_join(taxa, by = "Morphotype")
+  left_join(taxa_filled, by = "Morphotype")
 
 # Plot function to simplify repeated plot code
 plot_density <- function(data, group_col, fill_col, title) {
@@ -807,6 +1449,78 @@ coral_dominated <- gardens_df %>%
 
 # Output results
 kable(coral_dominated) %>% kable_styling(font_size = 7, latex_options = c("striped"))
+
+
+garden_summary <- gardens_df %>%
+  group_by(garden_id) %>%
+  summarise(
+    morphotype_richness = n_distinct(Morphotype),     # unique morphotypes
+    total_density = sum(density),                    # sum of all morphotype densities
+    mean_density = mean(density),                    # mean density across morphotypes
+    sd_density = sd(density),                        # SD across morphotypes
+    total_coral = sum(density[Phylum == "Cnidaria"]),
+    total_sponge = sum(density[Phylum == "Porifera"]),
+    proportion_coral = total_coral / total_density,
+    proportion_sponge = total_sponge / total_density,
+    is_coral_dominated = proportion_coral > proportion_sponge,
+    is_sponge_dominated = proportion_sponge > proportion_coral,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_density))
+
+garden_summary
+
+### NEW CODE
+
+# Read files as before
+list_of_dfs <- lapply(seq_along(file_paths), function(i) {
+  df <- read_excel(file_paths[i])
+  df$garden_id <- garden_ids[i]
+  return(df)
+})
+
+gardens_df <- bind_rows(list_of_dfs)
+
+# Pivot longer to get one row per morphotype per frame
+gardens_long <- gardens_df %>%
+  pivot_longer(
+    cols = starts_with("C") | starts_with("P"), # all morphotype columns
+    names_to = "Morphotype",
+    values_to = "count"
+  ) %>%
+  # Join with taxa info to get Phylum, Family, etc.
+  left_join(taxa_filled, by = "Morphotype") %>%
+  # Calculate density per m²
+  mutate(density_per_m2 = count / area_squared)
+
+gardens_long <- gardens_long %>%
+  mutate(density_per_m2 = count / area_squared)
+
+frame_summary <- gardens_long %>%
+  group_by(garden_id, frame_id) %>%
+  summarise(
+    total_density_frame = sum(density_per_m2, na.rm = TRUE),
+    total_coral_frame = sum(density_per_m2[Phylum == "Cnidaria"], na.rm = TRUE),
+    total_sponge_frame = sum(density_per_m2[Phylum == "Porifera"], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+garden_summary <- frame_summary %>%
+  group_by(garden_id) %>%
+  summarise(
+    n_frames = n(),
+    mean_density = mean(total_density_frame),
+    sd_density = sd(total_density_frame),
+    mean_coral = mean(total_coral_frame),
+    mean_sponge = mean(total_sponge_frame),
+    proportion_coral = mean_coral / mean_density,
+    proportion_sponge = mean_sponge / mean_density,
+    density_report = paste0(round(mean_density,2), " ± ", round(sd_density,2)),
+    .groups = "drop"
+  )
+
+garden_summary
+
 
 ```
 
@@ -1021,20 +1735,21 @@ length_fragment_1+length_fragment_2 #600 m, so almost same as in the above table
 # DIVERSITY INDICES
 
 ## Alpha Diversity
+>I did not end up using these results, as I cannot compare alpha diversity across dives without saturated SACs. But I keep the code just in case. 
 
 ```{r}
 
 # Shannon's H' (for each dive)
 H <- tapply(data.a$Morphotype, data.a$Dive.Name, function(x) {
   species_abundance <- table(x)
-  diversity_index <- diversity(species_abundance, index = "shannon")
+  diversity_index <- vegan::diversity(species_abundance, index = "shannon")
   return(diversity_index)
 })
 
 # Simpsons (for each dive)
 S <- tapply(data.a$Morphotype, data.a$Dive.Name, function(x) {
   species_abundance <- table(x)
-  diversity_index <- diversity(species_abundance, index = "simpson")
+  diversity_index <- vegan::diversity(species_abundance, index = "simpson")
   return(diversity_index)
 })
 
@@ -1271,7 +1986,122 @@ ggplot(combined_df2, aes(x = Depth, y = Bray_Curtis)) +
 
 ```
 
-> Summary of Beta Diversity. Geographic and depth distance have an impact on the beta diversity. The similarity increases when the sites are geographically closer, and even stronger when the depth distance is considered. 
+### Nestedness and Turnover
+
+``` {r}
+
+# Beta Diversity & Turnover Analysis
+
+# 1. Prepare community matrix
+community_matrix <- data.a %>%
+  group_by(Dive.Name, Morphotype) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Morphotype, values_from = count, values_fill = 0) %>%
+  column_to_rownames("Dive.Name")
+
+# Convert to presence/absence
+comm_pa <- (community_matrix > 0) * 1
+
+# 2. Beta diversity partitioning
+beta_core <- betapart.core(comm_pa)
+
+# Total beta diversity & components
+beta_results <- beta.multi(beta_core, index.family = "jaccard")
+print(beta_results)
+
+# Pairwise components
+beta_pair <- beta.pair(beta_core, index.family = "sor")  # Sorensen presence/absence
+
+# 3. Clean and match dive codes
+# Extract simplified dive codes (####_##) from beta matrix rownames
+beta_sites <- sub("EX([0-9]{4})_?DIVE?0*([0-9]{1,2}).*", "\\1_\\2",
+                  rownames(beta_pair$beta.sim), ignore.case = TRUE)
+beta_sites <- sapply(strsplit(beta_sites, "_"), function(parts) {
+  sprintf("%s_%02d", parts[1], as.numeric(parts[2]))
+})
+
+# Update rownames and colnames of beta.sim
+rownames(beta_pair$beta.sim) <- beta_sites
+colnames(beta_pair$beta.sim) <- beta_sites
+
+# Match with watermass groups from data.b
+group_vector <- data.b$watermass[match(beta_sites, data.b$Dive.Name)]
+group_df <- data.frame(site = beta_sites, group = group_vector, stringsAsFactors = FALSE)
+
+# Remove sites with missing group info
+valid_sites <- !is.na(group_df$group)
+beta_pair$beta.sim <- beta_pair$beta.sim[valid_sites, valid_sites]
+group_df <- group_df[valid_sites, ]
+
+# 4. Pairwise turnover function
+
+get_pairwise_turnover <- function(beta_matrix, group_df) {
+  pairs <- combn(rownames(beta_matrix), 2)
+  results <- data.frame(
+    site1 = pairs[1, ],
+    site2 = pairs[2, ],
+    turnover = mapply(function(x, y) beta_matrix[x, y], pairs[1, ], pairs[2, ])
+  )
+  
+  # Add group info
+  results <- merge(results, group_df, by.x = "site1", by.y = "site")
+  colnames(results)[4] <- "group1"
+  results <- merge(results, group_df, by.x = "site2", by.y = "site")
+  colnames(results)[5] <- "group2"
+  
+  # Label pairs
+  results$pair_type <- ifelse(results$group1 == results$group2, "Within group", "Between groups")
+  
+  return(results)
+}
+
+# 5. Compute turnover pairs-
+turnover_pairs <- get_pairwise_turnover(as.matrix(beta_pair$beta.sim), group_df)
+
+# 7. Calculate summary statistics
+within_turnover <- turnover_pairs$turnover[turnover_pairs$pair_type == "Within group"]
+between_turnover <- turnover_pairs$turnover[turnover_pairs$pair_type == "Between groups"]
+
+mean_within <- mean(within_turnover)
+sd_within <- sd(within_turnover)
+mean_between <- mean(between_turnover)
+sd_between <- sd(between_turnover)
+
+mean_within; sd_within
+mean_between; sd_between
+
+# 8. Permutation test
+
+set.seed(123)
+obs_diff <- mean(between_turnover) - mean(within_turnover)
+all_values <- turnover_pairs$turnover
+labels <- turnover_pairs$pair_type
+n_perm <- 999
+perm_diffs <- numeric(n_perm)
+
+for (i in 1:n_perm) {
+  perm_labels <- sample(labels)
+  perm_within <- all_values[perm_labels == "Within group"]
+  perm_between <- all_values[perm_labels == "Between groups"]
+  perm_diffs[i] <- mean(perm_between) - mean(perm_within)
+}
+
+p_value <- (sum(abs(perm_diffs) >= abs(obs_diff)) + 1) / (n_perm + 1)
+p_value
+
+# Annotated boxplot with p-value
+ggplot(turnover_pairs, aes(x = pair_type, y = turnover, fill = pair_type)) +
+  geom_boxplot() +
+  labs(title = "Species Turnover Within and Between Groups",
+       y = "Turnover (β_SIM)",
+       x = "Pair Type") +
+  scale_fill_manual(values = c("Within group" = "lightgreen", "Between groups" = "pink")) +
+  theme_minimal() +
+  annotate("text", x = 1.5, y = max(turnover_pairs$turnover) * 0.95,
+           label = paste0("p = ", signif(p_value, 3)), size = 5)
+
+
+```
 
 # COMMUNITY COMPOSITION
 
@@ -1324,6 +2154,7 @@ results <- lapply(variables, function(var) adonis2(as.formula(paste("bray.df ~",
 results
 
 ```
+
 
 ## Transform data
 
@@ -1552,6 +2383,97 @@ env.Procrustes.sign
 
 > Procrustes shows a moderate correlation between species and env data. R = 0.31. Significance (p < 0.001) indicates that the relationship between the environmental and species data is not random. The result suggests that while the correlation is moderate, the association is still meaningful and statistically reliable. Proceed with multivariate analysis (CCA)
 
+## NMDS
+
+``` {r}
+
+##NMDS
+
+# 2. Run NMDS (k = 2 dimensions)
+set.seed(123)
+
+nmds <- metaMDS(bray.df, k = 2, trymax = 100)
+
+# 3. Extract NMDS site‐scores
+nmds_scores <- as.data.frame(scores(nmds, display = "sites"))
+nmds_scores$Dive.Name <- rownames(nmds_scores)
+
+# Prepare NMDS site coordinates matrix
+nmds_mat <- nmds_scores %>%
+  dplyr::select(NMDS1, NMDS2) %>%
+  as.matrix()
+
+# Run k-means
+set.seed(123)
+km_nmds <- kmeans(nmds_mat, centers = 5, nstart = 25)
+
+cluster_assignments <- data.frame(
+  Dive.Name = rownames(nmds_scores),
+  cluster = factor(km_nmds$cluster)
+)
+
+nmds_df <- nmds_scores %>%
+  left_join(cluster_assignments, by = "Dive.Name")
+
+# 5. Plot NMDS
+ggplot(nmds_df, aes(x = NMDS1, y = NMDS2, color = cluster, fill = cluster)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Dive.Name), size = 3, box.padding = 0.4) +
+  labs(
+    title = "NMDS of Coral/Sponge Community (Bray–Curtis)",
+    subtitle = paste0("Stress = ", round(nmds$stress, 3))
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+
+
+### Redo 
+#I need to remove Dive 2304_08 here because it only has one morphotype, so it highly skews the analysis... 
+# Remove outlier dive (only one morphotype)
+bray_nmds <- bray.df[rownames(bray.df) != "2304_08", ]
+
+# Bray–Curtis dissimilarity
+bray_dist <- vegdist(bray_nmds, method = "bray")
+# Hierarchical clustering (UPGMA)
+hc <- hclust(bray_dist, method = "average")
+
+# Cut tree into 5 clusters
+clusters <- cutree(hc, k = 7)
+
+cluster_df <- data.frame(
+  Dive.Name = names(clusters),
+  cluster = factor(clusters)
+)
+
+set.seed(123)
+nmds <- metaMDS(bray_nmds, k = 2, trymax = 100)
+
+nmds_scores <- as.data.frame(scores(nmds, display = "sites"))
+nmds_scores$Dive.Name <- rownames(nmds_scores)
+
+# Merge cluster assignments
+nmds_df <- nmds_scores %>%
+  left_join(cluster_df, by = "Dive.Name")
+
+ggplot(nmds_df, aes(x = NMDS1, y = NMDS2, colour = cluster)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Dive.Name),
+                  size = 3,
+                  box.padding = 0.4,
+                  max.overlaps = 20) +
+  labs(
+    title = "NMDS of Coral and Sponge Communities (Bray–Curtis)",
+    subtitle = paste0("Stress = ", round(nmds$stress, 3)),
+    colour = "Cluster"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+
+```
+
+
 # CCA
 
 > Using CCA (Canonical Correspondence Analysis) as this assumes unimodal relationships instead of linear. In nature, this is probably a more realistic assumption. 
@@ -1667,7 +2589,7 @@ cca.sites$sed_consistency <- as.factor(data.b$sed_consistency) # Add the feature
 # Convert row names to a column
 cca.species$Morphotype <- rownames(cca.species)
 # Merge with taxa_df using cleaned species names
-cca_full_df <- merge(cca.species, taxa, by = "Morphotype")
+cca_full_df <- merge(cca.species, taxa_filled, by = "Morphotype")
 
 #Maybe add only significant species:
 # Step 1: Run envfit to test significance of species with CCA axes
@@ -1841,9 +2763,6 @@ plot.cca_family
 
 #This needs to be run in console because there is prompt asking for the download of the underlying data (map), so not included in Markdown knitted file
 
-library(ggOceanMaps)
-#packageVersion("ggOceanMaps")
-
 # Assuming your original data is stored in 'data'
 data.map <- data.c %>%
   group_by(Dive.Name) %>%
@@ -1885,4 +2804,339 @@ data_transformed <- data.map %>%
 
 #Feature No: 1 canyon ; 2 ridge, 3 seamount, 4 seep, 5 slope
 
+
 ```
+
+# Optional: OBIS records
+
+```{r}
+
+porifera_alaska <- robis::occurrence("porifera", 
+                                     geometry = "POLYGON ((-170 51, -130 51, -130 61, -170 61, -170 51))")
+
+robis::map_leaflet(porifera_alaska)
+
+octo_alaska <- robis::occurrence("octocorallia", 
+                                     geometry = "POLYGON ((-170 51, -130 51, -130 61, -170 61, -170 51))")
+robis::map_leaflet(octo_alaska)
+
+porifera_alaska <- porifera_alaska %>%
+  mutate(group = "Porifera")
+
+octo_alaska <- octo_alaska %>%
+  mutate(group = "Octocorallia")
+
+combined_data <- bind_rows(porifera_alaska, octo_alaska) %>%
+  filter(!is.na(depth), depth >= 0)
+
+# Make sure eventDate is a Date object
+porifera_alaska <- porifera_alaska %>%
+  mutate(
+    group = "Porifera",
+    eventDate = as.Date(eventDate)
+  )
+
+octo_alaska <- octo_alaska %>%
+  mutate(
+    group = "Octocorallia",
+    eventDate = as.Date(eventDate)
+  )
+
+# Combine and filter
+combined_data <- bind_rows(porifera_alaska, octo_alaska) %>%
+  filter(!is.na(depth), depth >= 0) 
+  # We can also filter for records collected before the new records were added ,,, 
+  #filter(eventDate < as.Date("2023-09-09"))
+
+ggplot(combined_data, aes(x = depth, fill = group)) +
+  geom_histogram(binwidth = 50, position = "stack", color = "black") +
+  labs(x = "Depth (m)", y = "Frequency", title = "Depth Distribution of Porifera and Octocorallia in Alaska") +
+  scale_fill_manual(values = c("Porifera" = "skyblue", "Octocorallia" = "coral")) +
+  theme_minimal()
+
+ggplot(combined_data, aes(x = depth, fill = group)) +
+  geom_histogram(binwidth = 100, position = "stack", color = "black") +
+  scale_x_reverse() +
+  coord_flip() +
+  scale_y_break(c(4500, 7000)) +  # adjust to your shallow peak range
+  labs(
+    y = "Frequency of records",
+    x = "Depth (m)",
+    title = "Depth Distribution of Porifera and Octocorallia in Alaska"
+  ) +
+  scale_fill_manual(values = c("Porifera" = "skyblue",
+                               "Octocorallia" = "coral")) +
+  theme_minimal()
+
+#This is density, so estimated
+ggplot(combined_data, aes(x = depth, fill = group, color = group)) +
+  geom_density(alpha = 0.3) +
+  scale_x_reverse() +  # Invert depth axis
+  coord_flip() +  # Swap x and y axes
+  labs(y = "Density", x = "Depth (m)", title = "Depth Distribution of Porifera and Octocorallia in Alaska") +
+  scale_fill_manual(values = c("Porifera" = "skyblue", "Octocorallia" = "coral")) +
+  scale_color_manual(values = c("Porifera" = "skyblue", "Octocorallia" = "coral")) +
+  theme_minimal()
+
+#This is frequency, so actual data records
+ggplot(combined_data, aes(x = depth, fill = group)) +
+  geom_histogram(binwidth = 100, position = "stack", color = "black") +
+  scale_x_reverse() +
+  coord_flip() +
+  labs(y = "Frequency of records", x = "Count", title = "Depth Distribution of Porifera and Octocorallia in Alaska") +
+  scale_fill_manual(values = c("Porifera" = "skyblue", "Octocorallia" = "coral")) +
+  theme_minimal()
+
+ggplot(combined_data, aes(x = decimalLongitude, y = depth, color = group)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+#plot_ly(combined_data, x = ~decimalLongitude, y = ~decimalLatitude, z = ~depth, 
+#        color = ~group, colors = c("skyblue", "coral"), type = "scatter3d", mode = "markers") %>%
+#  layout(scene = list(zaxis = list(title = "Depth (m)", autorange = "reversed"),
+ #                     xaxis = list(title = "Longitude"),
+ #                     yaxis = list(title = "Latitude")))
+
+
+#DO this for specific taxa
+
+paragorgia_alaska <- robis::occurrence("paragorgia arborea", 
+                                     geometry = "POLYGON ((-170 51, -130 51, -130 61, -170 61, -170 51))")
+
+robis::map_leaflet(paragorgia_alaska)
+
+ggplot(paragorgia_alaska, aes(x = decimalLongitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+ggplot(paragorgia_alaska, aes(x = decimalLatitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+#Do not in the Knitted PDF... 
+#plot_ly(paragorgia_alaska, x = ~decimalLongitude, y = ~decimalLatitude, z = ~depth, type = "scatter3d", mode = "markers") %>%
+#  layout(scene = list(zaxis = list(title = "Depth (m)", autorange = "reversed"),
+#                      xaxis = list(title = "Longitude"),
+#                      yaxis = list(title = "Latitude")))
+
+
+#DO this for specific taxa
+
+primnoa_alaska <- robis::occurrence("primnoa pacifica", 
+                                       geometry = "POLYGON ((-170 51, -130 51, -130 65, -170 65, -170 51))")
+
+robis::map_leaflet(primnoa_alaska)
+
+ggplot(primnoa_alaska, aes(x = decimalLongitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+ggplot(primnoa_alaska, aes(x = decimalLatitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+#plot_ly(primnoa_alaska, x = ~decimalLongitude, y = ~decimalLatitude, z = ~depth, type = "scatter3d", mode = "markers") %>%
+#  layout(scene = list(zaxis = list(title = "Depth (m)", autorange = "reversed"),
+#                      xaxis = list(title = "Longitude"),
+#                      yaxis = list(title = "Latitude")))
+
+
+#DO this for specific taxa
+
+aphro_alaska <- robis::occurrence("aphrocallistes", 
+                                    geometry = "POLYGON ((-170 51, -130 51, -130 65, -170 65, -170 51))")
+
+robis::map_leaflet(aphro_alaska)
+
+ggplot(aphro_alaska, aes(x = decimalLongitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+ggplot(aphro_alaska, aes(x = decimalLatitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+#plot_ly(aphro_alaska, x = ~decimalLongitude, y = ~decimalLatitude, z = ~depth, type = "scatter3d", mode = "markers") %>%
+#  layout(scene = list(zaxis = list(title = "Depth (m)", autorange = "reversed"),
+#                      xaxis = list(title = "Longitude"),
+ #                     yaxis = list(title = "Latitude")))
+
+
+
+#DO this for specific taxa
+
+myc_alaska <- robis::occurrence("mycale loveni", 
+                                  geometry = "POLYGON ((-170 51, -130 51, -130 65, -170 65, -170 51))")
+
+robis::map_leaflet(myc_alaska)
+
+ggplot(myc_alaska, aes(x = decimalLongitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+ggplot(myc_alaska, aes(x = decimalLatitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+#plot_ly(myc_alaska, x = ~decimalLongitude, y = ~decimalLatitude, z = ~depth, type = "scatter3d", mode = "markers") %>%
+#  layout(scene = list(zaxis = list(title = "Depth (m)", autorange = "reversed"),
+#                      xaxis = list(title = "Longitude"),
+#                      yaxis = list(title = "Latitude")))
+
+
+# Cladorhizidae
+clad_alaska <- robis::occurrence("cladorhizidae", 
+                                geometry = "POLYGON ((-170 51, -130 51, -130 65, -170 65, -170 51))")
+
+robis::map_leaflet(clad_alaska)
+
+ggplot(clad_alaska, aes(x = decimalLongitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+ggplot(clad_alaska, aes(x = decimalLatitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+
+# Rhabdocalyptus
+clad_alaska <- robis::occurrence("rhabdocalyptus", 
+                                 geometry = "POLYGON ((-170 51, -130 51, -130 65, -170 65, -170 51))")
+
+robis::map_leaflet(clad_alaska)
+
+ggplot(clad_alaska, aes(x = decimalLongitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+ggplot(clad_alaska, aes(x = decimalLatitude, y = depth)) +
+  geom_point(alpha = 0.5) +
+  scale_y_reverse() +
+  labs(x = "Longitude", y = "Depth (m)", title = "Recruitment Niches Based on Depth and Location") +
+  theme_minimal()
+
+combined_data$taxonRank <- tolower(combined_data$taxonRank)
+unique(combined_data$taxonRank)
+
+combined_data <- as.data.frame(combined_data)
+
+beyond_family <- combined_data %>%
+  filter(taxonRank %in% c("genus", "species", "subspecies", "subgenus")) %>%
+  nrow()
+
+total_records <- nrow(combined_data)
+
+percentage_beyond_family <- (beyond_family / total_records) * 100
+
+cat("Number of records beyond family level:", beyond_family, "\n")
+cat("Percentage of records beyond family level:", round(percentage_beyond_family, 2), "%\n")
+
+na_count <- sum(is.na(combined_data$taxonRank))
+cat("Number of records with NA in taxonRank:", na_count, "\n")
+
+# Percentage of NA values
+percentage_na <- (na_count / nrow(combined_data)) * 100
+cat("Percentage of NA values in taxonRank:", round(percentage_na, 2), "%\n")
+
+combined_data %>%
+  count(taxonRank, sort = TRUE)
+
+phylum_count <- sum(combined_data$taxonRank == "phylum", na.rm = TRUE)
+na_count <- sum(is.na(combined_data$taxonRank))
+family_count <- sum(combined_data$taxonRank == "family", na.rm = TRUE)
+
+total_records <- nrow(combined_data)
+
+percentage_phylum <- (phylum_count / total_records) * 100
+percentage_na <- (na_count / total_records) * 100
+percentage_family <- (family_count / total_records) * 100
+
+
+cat("Number of records at phylum level:", phylum_count, "\n")
+cat("Percentage of records at phylum level:", round(percentage_phylum, 2), "%\n")
+cat("Number of records with NA in taxonRank:", na_count, "\n")
+cat("Percentage of NA values in taxonRank:", round(percentage_na, 2), "%\n")
+cat("Number of records with family in taxonRank:", family_count, "\n")
+cat("Percentage of family values in taxonRank:", round(percentage_family, 2), "%\n")
+
+```
+
+# Optional: Deep sea area in Alaska
+> I excluded the code in the Knitted script because its too large for the Knitted PDF. 
+
+```{r,eval=FALSE}
+
+# Load bathymetry data
+gebco <- raster("./GEBCO_13_Feb_2026_ee86990a81a9/gebco_2025_n78.4245_s40.5883_w164.6706_e231.6529.nc")
+
+# Check data
+plot(gebco)
+
+gebco[gebco > 0] <- NA
+
+deep_seafloor <- gebco < -200
+# Calculate the area of each grid cell
+cell_area <- area(gebco)
+
+# Multiply by the deep seafloor mask to get only the area deeper than 500 m
+deep_area <- sum(cell_area[deep_seafloor], na.rm = TRUE)
+
+cat("Total seafloor area below 200 m in Alaska's waters:", round(deep_area, 2), "km²\n")
+
+# Calculate total seafloor area (excluding land)
+total_area <- sum(cell_area[!is.na(gebco)], na.rm = TRUE)
+
+cat("Total seafloor area in Alaska's waters:", round(total_area, 2), "km²\n")
+
+percentage_deep <- (deep_area / total_area) * 100
+
+cat("Total seafloor area below 200 m in Alaska's waters:", round(deep_area, 2), "km²\n")
+cat("Percentage of seafloor deeper than 200 m:", round(percentage_deep, 2), "%\n")
+
+avg_depth <- mean(values(gebco), na.rm = TRUE)
+
+cat("Average seafloor depth in Alaska's waters:", round(avg_depth, 2), "m\n")
+
+# Convert to dataframe
+gebco_df <- as.data.frame(gebco, xy = TRUE)
+names(gebco_df) <- c("x", "y", "depth")
+
+# Optional: highlight areas deeper than 200 m
+gebco_df <- gebco_df %>% mutate(deep200 = depth < -200)
+
+# Plot
+ggplot(gebco_df, aes(x = x, y = y, fill = depth)) +
+  geom_raster() +
+  scale_fill_gradientn(colors = c("lightblue", "blue", "darkblue"), na.value = "white") +
+  geom_raster(data = subset(gebco_df, deep200), fill = "red", alpha = 0.4) +
+  labs(title = "Bathymetry of Alaska with Deep Areas (<500 m) Highlighted") +
+  theme_minimal()
+
+#This raster is not 100% the EEZ, but the Aleutians + GoA, bit of the Bering Sea. So it includes the study area, and a little bit of Russia too, because I couldn't just compute this for the EEZ - not sure how to make it work... but looking at the map of Alaskas EEZ the 80% seem to fit quite well actually. 
+
+```
+
