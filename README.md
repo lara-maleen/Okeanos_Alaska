@@ -8,9 +8,9 @@ This repository contains the data, R scripts, and reproducible workflow used to 
 
 The processed datasets and derived environmental variables are also archived in Zenodo (DOI: 10.5281/zenodo.18221896), which includes morphotype-level observations, depth-binned summaries, and dive-level aggregations. Raw CTD and multibeam bathymetry data are publicly available via NOAA repositories and can be requested from the authors if needed.
 
-**Preprint**
+**Publication**
 
-A preprint describing the associated analyses is available at SSRN: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5317177
+The publiaction is availble here: https://doi.org/10.1016/j.dsr.2026.104683
 
 **Repository Structure**
 
@@ -30,7 +30,9 @@ Each .Rmd file is accompanied by a rendered HTML version for easy navigation of 
 
 **Usage**
 
-You are free to use, adapt, and share these materials for non-commercial purposes, provided proper credit is given. Please cite the Zenodo dataset and the preprint (or the forthcoming peer-reviewed paper) when using this data or code in your work.
+You are free to use, adapt, and share these materials for non-commercial purposes, provided proper credit is given. Please cite the Zenodo dataset and the peer-reviewed paper when using this data or code in your work.
+
+Beckmann, L. M., Vad, J., & Waller, R. G. (2026). Diversity and Environmental Drivers of Deep-Sea Sponge and Coral Communities in Alaska. Deep Sea Research Part I: Oceanographic Research Papers, 229, 104683. https://doi.org/10.1016/j.dsr.2026.104683 
 
 For questions regarding the code, data, or workflow, contact: laramaleenbeck@gmail.com
 
